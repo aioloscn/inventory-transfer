@@ -1,0 +1,104 @@
+spring:
+  application:
+    name: sits
+  profiles:
+    active: dev
+
+  datasource:
+    url: jdbc:mysql://localhost:3306/sits_db?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    username: root
+    password: root
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    hikari:
+      minimum-idle: 5
+      maximum-pool-size: 20
+      idle-timeout: 300000
+      max-lifetime: 1200000
+      connection-timeout: 30000
+
+  # Spring Boot 3.x Redis config (spring.data.redis)
+  data:
+    redis:
+      host: localhost
+      port: 6379
+      password:
+      database: 6
+      timeout: 5000ms
+      lettuce:
+        pool:
+          max-active: 16
+          max-idle: 8
+          min-idle: 4
+          max-wait: 3000ms
+
+  # Jackson configuration
+  jackson:
+    date-format: yyyy-MM-dd HH:mm:ss
+    time-zone: Asia/Shanghai
+    default-property-inclusion: non_null
+
+# RocketMQ (top-level prefix, NOT spring.rocketmq)
+rocketmq:
+  name-server: localhost:9876
+  producer:
+    group: sits-producer-group
+    send-message-timeout: 3000
+    retry-times-when-send-failed: 2
+
+mybatis-plus:
+  mapper-locations: classpath*:/mapper/**/*.xml
+  type-aliases-package: com.sits
+  configuration:
+    map-underscore-to-camel-case: true
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+  global-config:
+    db-config:
+      id-type: auto
+      logic-delete-field: deleted
+      logic-delete-value: 1
+      logic-not-delete-value: 0
+
+# Sa-Token
+sa-token:
+  token-name: satoken
+  timeout: 86400
+  active-timeout: 1800
+  is-concurrent: true
+  is-share: true
+  token-style: uuid
+  is-log: false
+
+# Knife4j API Documentation
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+  api-docs:
+    path: /v3/api-docs
+
+knife4j:
+  enable: true
+  setting:
+    language: zh_cn
+
+# XXL-Job
+xxl:
+  job:
+    admin:
+      addresses: http://127.0.0.1:18089/xxl-job-admin
+    accessToken: default_token
+    executor:
+      appname: sits-executor
+      port: 19999
+      logpath: /data/applogs/xxl-job/jobhandler
+      logretentiondays: 30
+
+# Server
+server:
+  port: 18389
+
+# Logging
+logging:
+  level:
+    com.sits: DEBUG
+    org.springframework.statemachine: INFO
+    org.apache.rocketmq: WARN
