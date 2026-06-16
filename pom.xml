@@ -43,12 +43,24 @@
 
         <!-- AI versions -->
         <spring-ai.version>2.0.0-RC2</spring-ai.version>
+        <spring-ai-openai.version>1.0.0-M6</spring-ai-openai.version>
 
         <!-- Utility versions -->
         <hutool.version>5.8.28</hutool.version>
         <knife4j.version>4.5.0</knife4j.version>
         <redisson.version>3.27.2</redisson.version>
     </properties>
+
+    <repositories>
+        <repository>
+            <id>spring-milestones</id>
+            <name>Spring Milestones</name>
+            <url>https://repo.spring.io/milestone</url>
+            <snapshots>
+                <enabled>false</enabled>
+            </snapshots>
+        </repository>
+    </repositories>
 
     <dependencyManagement>
         <dependencies>
@@ -112,6 +124,11 @@
                 <groupId>org.springframework.ai</groupId>
                 <artifactId>spring-ai-client-chat</artifactId>
                 <version>${spring-ai.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.springframework.ai</groupId>
+                <artifactId>spring-ai-openai-spring-boot-starter</artifactId>
+                <version>${spring-ai-openai.version}</version>
             </dependency>
 
             <!-- Hutool -->

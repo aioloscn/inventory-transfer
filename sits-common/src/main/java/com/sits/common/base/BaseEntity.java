@@ -9,16 +9,22 @@ import java.io.Serializable;
 import java.time.LocalDateTime;
 
 /**
- * Base entity providing common fields for all persistence entities.
+ * 基础实体类，为所有持久化实体提供公共字段（主键 ID、创建时间、更新时间）。
+ *
+ * <p>子类继承此类即可自动获得自增主键和自动填充的时间字段，无需重复定义。
+ * 时间字段由 {@link com.sits.common.handler.MyMetaObjectHandler} 自动填充。
  */
 public abstract class BaseEntity implements Serializable {
 
+    /** 自增主键 */
     @TableId(type = IdType.AUTO)
     private Long id;
 
+    /** 创建时间（插入时自动填充） */
     @TableField(fill = FieldFill.INSERT)
     private LocalDateTime createTime;
 
+    /** 更新时间（插入和更新时自动填充） */
     @TableField(fill = FieldFill.INSERT_UPDATE)
     private LocalDateTime updateTime;
 

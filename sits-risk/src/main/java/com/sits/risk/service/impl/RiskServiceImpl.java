@@ -1,8 +1,12 @@
 package com.sits.risk.service.impl;
 
+import cn.dev33.satoken.stp.StpUtil;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.sits.admin.entity.Warehouse;
 import com.sits.admin.mapper.WarehouseMapper;
+import com.sits.common.base.PageQuery;
+import com.sits.common.base.PageResult;
 import com.sits.common.enums.RiskLevel;
 import com.sits.common.enums.RiskStatus;
 import com.sits.common.enums.RiskType;
@@ -20,8 +24,11 @@ import com.sits.risk.mapper.CompensationTaskMapper;
 import com.sits.risk.mapper.InventoryRiskMapper;
 import com.sits.risk.mapper.MqConsumeRecordMapper;
 import com.sits.risk.service.RiskService;
+import com.sits.transfer.entity.TransferOrder;
 import com.sits.transfer.entity.TransferSuggestion;
 import com.sits.transfer.mapper.TransferSuggestionMapper;
+import com.sits.transfer.service.TransferOrderService;
+import com.sits.risk.service.RuleConfigService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -54,12 +61,13 @@ public class RiskServiceImpl implements RiskService {
 
     private static final Logger log = LoggerFactory.getLogger(RiskServiceImpl.class);
 
-    /** Thresholds — could be moved to a config table later */
-    private static final int SHORTAGE_DAYS_HIGH = 3;
-    private static final int SHORTAGE_DAYS_MEDIUM = 7;
-    private static final int OVERSTOCK_DAYS = 30;
-    private static final BigDecimal OVERSTOCK_RATIO = BigDecimal.valueOf(0.8);
-    private static final int AVG_SALES_LOOKBACK_DAYS = 30;
+    /** 阈值键名常量 — 对应 rule_config 表中的 config_key */
+    private static final String KEY_SHORTAGE_HIGH = "shortage_high_days";
+    private static final String KEY_SHORTAGE_MEDIUM = "shortage_medium_days";
+    private static final String KEY_OVERSTOCK_DAYS = "overstock_days";
+    private static final String KEY_OVERSTOCK_RATIO = "overstock_ratio";
+    private static final String KEY_LOOKBACK_DAYS = "avg_sales_lookback_days";
+    private static final String KEY_SUGGESTION_EXPIRE = "suggestion_expire_days";
 
     private final InventoryRiskMapper riskMapper;
     private final WarehouseInventoryMapper inventoryMapper;
@@ -68,6 +76,8 @@ public class RiskServiceImpl implements RiskService {
     private final CompensationTaskMapper compensationTaskMapper;
     private final MqConsumeRecordMapper mqConsumeRecordMapper;
     private final WarehouseMapper warehouseMapper;
+    private final TransferOrderService transferOrderService;
+    private final RuleConfigService ruleConfigService;
 
     public RiskServiceImpl(InventoryRiskMapper riskMapper,
                            WarehouseInventoryMapper inventoryMapper,
@@ -75,7 +85,9 @@ public class RiskServiceImpl implements RiskService {
                            TransferSuggestionMapper suggestionMapper,
                            CompensationTaskMapper compensationTaskMapper,
                            MqConsumeRecordMapper mqConsumeRecordMapper,
-                           WarehouseMapper warehouseMapper) {
+                           WarehouseMapper warehouseMapper,
+                           TransferOrderService transferOrderService,
+                           RuleConfigService ruleConfigService) {
         this.riskMapper = riskMapper;
         this.inventoryMapper = inventoryMapper;
         this.salesStatMapper = salesStatMapper;
@@ -83,6 +95,8 @@ public class RiskServiceImpl implements RiskService {
         this.compensationTaskMapper = compensationTaskMapper;
         this.mqConsumeRecordMapper = mqConsumeRecordMapper;
         this.warehouseMapper = warehouseMapper;
+        this.transferOrderService = transferOrderService;
+        this.ruleConfigService = ruleConfigService;
     }
 
     // ==================== Risk Scan ====================
@@ -108,14 +122,18 @@ public class RiskServiceImpl implements RiskService {
 
             // --- Shortage risk ---
             if (available < safety) {
+                // 从规则配置中读取缺货阈值
+                int shortageHighDays = ruleConfigService.getIntValue(KEY_SHORTAGE_HIGH, 3);
+                int shortageMediumDays = ruleConfigService.getIntValue(KEY_SHORTAGE_MEDIUM, 7);
+
                 BigDecimal supportDays = avgDailySales.compareTo(BigDecimal.ZERO) > 0
                         ? BigDecimal.valueOf(available).divide(avgDailySales, 2, RoundingMode.HALF_UP)
                         : BigDecimal.ZERO;
 
                 RiskLevel level;
-                if (supportDays.compareTo(BigDecimal.valueOf(SHORTAGE_DAYS_HIGH)) < 0) {
+                if (supportDays.compareTo(BigDecimal.valueOf(shortageHighDays)) < 0) {
                     level = RiskLevel.HIGH;
-                } else if (supportDays.compareTo(BigDecimal.valueOf(SHORTAGE_DAYS_MEDIUM)) < 0) {
+                } else if (supportDays.compareTo(BigDecimal.valueOf(shortageMediumDays)) < 0) {
                     level = RiskLevel.MEDIUM;
                 } else {
                     level = RiskLevel.LOW;
@@ -140,13 +158,17 @@ public class RiskServiceImpl implements RiskService {
 
             // --- Overstock risk ---
             if (inv.getMaxStock() != null && inv.getMaxStock() > 0) {
+                // 从规则配置中读取积压阈值
+                BigDecimal overstockRatio = new BigDecimal(ruleConfigService.getValue(KEY_OVERSTOCK_RATIO, "0.8"));
+                int overstockDays = ruleConfigService.getIntValue(KEY_OVERSTOCK_DAYS, 30);
+
                 BigDecimal overstockThreshold = BigDecimal.valueOf(inv.getMaxStock())
-                        .multiply(OVERSTOCK_RATIO);
+                        .multiply(overstockRatio);
                 if (available > overstockThreshold.intValue()
                         && avgDailySales.compareTo(BigDecimal.ZERO) > 0) {
                     BigDecimal supportDays = BigDecimal.valueOf(available)
                             .divide(avgDailySales, 2, RoundingMode.HALF_UP);
-                    if (supportDays.compareTo(BigDecimal.valueOf(OVERSTOCK_DAYS)) > 0) {
+                    if (supportDays.compareTo(BigDecimal.valueOf(overstockDays)) > 0) {
                         InventoryRisk risk = new InventoryRisk();
                         risk.setRiskNo(NoGenerator.generateRiskNo());
                         risk.setSkuId(inv.getSkuId());
@@ -172,14 +194,24 @@ public class RiskServiceImpl implements RiskService {
     }
 
     @Override
-    public List<InventoryRisk> listRisks(Long skuId, Long warehouseId, String riskType, String status) {
+    public PageResult<InventoryRisk> pageRisks(PageQuery pageQuery, Long skuId, Long warehouseId,
+                                                String riskType, String riskLevel, String status) {
         LambdaQueryWrapper<InventoryRisk> wrapper = new LambdaQueryWrapper<>();
         if (skuId != null) wrapper.eq(InventoryRisk::getSkuId, skuId);
         if (warehouseId != null) wrapper.eq(InventoryRisk::getWarehouseId, warehouseId);
         if (riskType != null) wrapper.eq(InventoryRisk::getRiskType, riskType);
+        if (riskLevel != null) wrapper.eq(InventoryRisk::getRiskLevel, riskLevel);
         if (status != null) wrapper.eq(InventoryRisk::getStatus, status);
         wrapper.orderByDesc(InventoryRisk::getCreateTime);
-        return riskMapper.selectList(wrapper);
+        IPage<InventoryRisk> page = riskMapper.selectPage(pageQuery.toPage(), wrapper);
+        return PageResult.of(page);
+    }
+
+    @Override
+    public InventoryRisk getRiskById(Long riskId) {
+        InventoryRisk risk = riskMapper.selectById(riskId);
+        if (risk == null) throw new BusinessException("风险记录不存在: " + riskId);
+        return risk;
     }
 
     @Override
@@ -260,7 +292,8 @@ public class RiskServiceImpl implements RiskService {
                     targetWarehouse.getWarehouseName(), risk.getSkuId(),
                     risk.getSupportDays(), best.warehouse().getWarehouseName(), best.quantity()));
             suggestion.setStatus(SuggestionStatus.GENERATED.name());
-            suggestion.setExpireTime(LocalDateTime.now().plusDays(7));
+            int expireDays = ruleConfigService.getIntValue(KEY_SUGGESTION_EXPIRE, 7);
+            suggestion.setExpireTime(LocalDateTime.now().plusDays(expireDays));
 
             suggestionMapper.insert(suggestion);
             suggestions.add(suggestion);
@@ -275,12 +308,22 @@ public class RiskServiceImpl implements RiskService {
     }
 
     @Override
-    public List<TransferSuggestion> listSuggestions(Long skuId, String status) {
+    public PageResult<TransferSuggestion> pageSuggestions(PageQuery pageQuery, Long skuId, String status) {
         LambdaQueryWrapper<TransferSuggestion> wrapper = new LambdaQueryWrapper<>();
         if (skuId != null) wrapper.eq(TransferSuggestion::getSkuId, skuId);
         if (status != null) wrapper.eq(TransferSuggestion::getStatus, status);
         wrapper.orderByDesc(TransferSuggestion::getCreateTime);
-        return suggestionMapper.selectList(wrapper);
+        IPage<TransferSuggestion> page = suggestionMapper.selectPage(pageQuery.toPage(), wrapper);
+        return PageResult.of(page);
+    }
+
+    @Override
+    public TransferSuggestion getSuggestionById(Long suggestionId) {
+        TransferSuggestion s = suggestionMapper.selectById(suggestionId);
+        if (s == null) {
+            throw new BusinessException("调拨建议不存在: " + suggestionId);
+        }
+        return s;
     }
 
     @Override
@@ -302,6 +345,43 @@ public class RiskServiceImpl implements RiskService {
         TransferSuggestion s = getSuggestionOrThrow(suggestionId);
         s.setStatus(SuggestionStatus.CONVERTED.name());
         suggestionMapper.updateById(s);
+    }
+
+    @Override
+    @Transactional
+    public String convertToTransferOrder(Long suggestionId) {
+        // 查询并校验调拨建议
+        TransferSuggestion suggestion = suggestionMapper.selectById(suggestionId);
+        if (suggestion == null) {
+            throw new BusinessException("调拨建议不存在: " + suggestionId);
+        }
+        if (!SuggestionStatus.CONFIRMED.name().equals(suggestion.getStatus())) {
+            throw new BusinessException("只有已确认的建议才能转为调拨单，当前状态: " + suggestion.getStatus());
+        }
+
+        // 从 Sa-Token 获取当前登录用户作为申请人
+        String loginId = StpUtil.getLoginIdAsString();
+        Long applicantId = null;
+        try {
+            applicantId = Long.valueOf(loginId);
+        } catch (NumberFormatException e) {
+            // userId 不是数字格式时 applicantId 传 null
+        }
+
+        // 创建调拨单（使用 TransferOrderService 确保完整的状态机初始化）
+        TransferOrder order = transferOrderService.create(
+                suggestion.getSkuId(),
+                suggestion.getSourceWarehouseId(),
+                suggestion.getTargetWarehouseId(),
+                suggestion.getSuggestQuantity(),
+                applicantId);
+
+        // 标记建议为已转换
+        suggestion.setStatus(SuggestionStatus.CONVERTED.name());
+        suggestionMapper.updateById(suggestion);
+
+        log.info("建议 {} 已转为调拨单 {}", suggestion.getSuggestionNo(), order.getTransferNo());
+        return order.getTransferNo();
     }
 
     // ==================== Compensation Tasks ====================
@@ -389,8 +469,9 @@ public class RiskServiceImpl implements RiskService {
     }
 
     private BigDecimal computeAvgDailySales(Long skuId, Long warehouseId) {
+        int lookbackDays = ruleConfigService.getIntValue(KEY_LOOKBACK_DAYS, 30);
         LocalDate endDate = LocalDate.now().minusDays(1);
-        LocalDate startDate = endDate.minusDays(AVG_SALES_LOOKBACK_DAYS - 1);
+        LocalDate startDate = endDate.minusDays(lookbackDays - 1);
 
         List<SalesStatDaily> stats = salesStatMapper.selectList(
                 new LambdaQueryWrapper<SalesStatDaily>()

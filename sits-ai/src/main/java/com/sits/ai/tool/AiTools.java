@@ -1,5 +1,6 @@
 package com.sits.ai.tool;
 
+import com.sits.common.base.PageQuery;
 import com.sits.inventory.entity.WarehouseInventory;
 import com.sits.inventory.service.InventoryService;
 import com.sits.risk.entity.InventoryRisk;
@@ -19,6 +20,8 @@ import java.util.List;
  */
 @Component
 public class AiTools {
+
+    private static final int AI_QUERY_LIMIT = 200;
 
     private final InventoryService inventoryService;
     private final RiskService riskService;
@@ -50,14 +53,18 @@ public class AiTools {
      * Query inventory risks with optional filters.
      */
     public List<InventoryRisk> queryRisks(Long skuId, Long warehouseId, String riskType) {
-        return riskService.listRisks(skuId, warehouseId, riskType, null);
+        PageQuery pq = new PageQuery();
+        pq.setPageSize(AI_QUERY_LIMIT);
+        return riskService.pageRisks(pq, skuId, warehouseId, riskType, null, null).getRecords();
     }
 
     /**
      * Query transfer suggestions (for AI to explain and present).
      */
     public List<TransferSuggestion> querySuggestions(Long skuId, String status) {
-        return riskService.listSuggestions(skuId, status);
+        PageQuery pq = new PageQuery();
+        pq.setPageSize(AI_QUERY_LIMIT);
+        return riskService.pageSuggestions(pq, skuId, status).getRecords();
     }
 
     /**

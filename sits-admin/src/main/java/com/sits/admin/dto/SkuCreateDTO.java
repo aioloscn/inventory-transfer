@@ -1,27 +1,40 @@
 package com.sits.admin.dto;
 
 import jakarta.validation.constraints.NotBlank;
-import jakarta.validation.constraints.NotNull;
-
 import java.math.BigDecimal;
 
 /**
- * Create SKU request.
+ * 创建 SKU 请求 DTO。
  */
 public class SkuCreateDTO {
 
+    /** SKU 编码 */
     @NotBlank(message = "SKU编码不能为空")
     private String skuCode;
 
+    /** SKU 名称 */
     @NotBlank(message = "SKU名称不能为空")
     private String skuName;
 
+    /** 分类 ID */
     private Long categoryId;
+
+    /** 品牌 */
     private String brand;
+
+    /** 单位 */
     private String unit;
+
+    /** 成本价 */
     private BigDecimal costPrice;
+
+    /** 销售价 */
     private BigDecimal salePrice;
+
+    /** 重量 */
     private BigDecimal weight;
+
+    /** 体积 */
     private BigDecimal volume;
 
     public String getSkuCode() { return skuCode; }

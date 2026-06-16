@@ -1,5 +1,8 @@
 package com.sits.common.handler;
 
+import cn.dev33.satoken.exception.NotLoginException;
+import cn.dev33.satoken.exception.NotPermissionException;
+import cn.dev33.satoken.exception.NotRoleException;
 import com.sits.common.base.Result;
 import com.sits.common.exception.BusinessException;
 import com.sits.common.exception.StateTransitionException;
@@ -66,6 +69,29 @@ public class GlobalExceptionHandler {
                 .orElse("参数绑定失败");
         log.warn("Bind failed: {}", message);
         return Result.fail(400, message);
+    }
+
+    // ========= Sa-Token auth exceptions =========
+
+    @ExceptionHandler(NotLoginException.class)
+    @ResponseStatus(HttpStatus.UNAUTHORIZED)
+    public Result<Void> handleNotLoginException(NotLoginException e) {
+        log.warn("Not login: {}", e.getMessage());
+        return Result.fail(401, "未登录或登录已过期，请重新登录");
+    }
+
+    @ExceptionHandler(NotRoleException.class)
+    @ResponseStatus(HttpStatus.FORBIDDEN)
+    public Result<Void> handleNotRoleException(NotRoleException e) {
+        log.warn("No role access: {}", e.getMessage());
+        return Result.fail(403, "无访问权限");
+    }
+
+    @ExceptionHandler(NotPermissionException.class)
+    @ResponseStatus(HttpStatus.FORBIDDEN)
+    public Result<Void> handleNotPermissionException(NotPermissionException e) {
+        log.warn("No permission: {}", e.getMessage());
+        return Result.fail(403, "无操作权限");
     }
 
     @ExceptionHandler(Exception.class)

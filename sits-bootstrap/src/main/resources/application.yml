@@ -21,7 +21,6 @@ spring:
     redis:
       host: localhost
       port: 6379
-      password:
       database: 6
       timeout: 5000ms
       lettuce:
@@ -37,7 +36,15 @@ spring:
     time-zone: Asia/Shanghai
     default-property-inclusion: non_null
 
-# RocketMQ (top-level prefix, NOT spring.rocketmq)
+  # Spring AI - DeepSeek (OpenAI compatible)
+  ai:
+    openai:
+      api-key: sk-53b7f3a4ce2a4e5dbaa758074b2d5cf6
+      base-url: https://api.deepseek.com
+      chat:
+        options:
+          model: deepseek-chat
+
 rocketmq:
   name-server: localhost:9876
   producer:

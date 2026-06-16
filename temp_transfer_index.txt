@@ -1,0 +1,210 @@
+﻿<template>
+  <PageContainer>
+    <template #search>
+      <div class="search-bar">
+        <el-form :inline="true" :model="queryParams">
+          <el-form-item label="状态">
+            <el-select v-model="queryParams.status" placeholder="全部" clearable>
+              <el-option v-for="(label, key) in TransferOrderStatusMap" :key="key" :label="label" :value="key" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="SKU">
+            <SkuSelector v-model="queryParams.skuId" clearable />
+          </el-form-item>
+          <el-form-item>
+            <el-button type="primary" @click="handleSearch">查询</el-button>
+            <el-button @click="resetSearch">重置</el-button>
+          </el-form-item>
+        </el-form>
+      </div>
+    </template>
+
+    <template #toolbar>
+      <div class="toolbar">
+        <el-button type="primary" @click="dialogVisible = true">
+          <el-icon><Plus /></el-icon> 手动创建调拨单
+        </el-button>
+      </div>
+    </template>
+
+    <el-table v-loading="loading" :data="tableData" stripe border>
+      <el-table-column prop="transferNo" label="调拨单号" width="200" />
+      <el-table-column prop="skuId" label="SKU ID" width="100" />
+      <el-table-column prop="sourceWarehouseId" label="源仓库" width="100" />
+      <el-table-column prop="targetWarehouseId" label="目标仓库" width="100" />
+      <el-table-column prop="transferQuantity" label="调拨数量" width="100" />
+      <el-table-column label="状态" width="110">
+        <template #default="{ row }"><StatusTag :status="row.status" /></template>
+      </el-table-column>
+      <el-table-column prop="createTime" label="创建时间" width="170" />
+      <el-table-column label="操作" width="180" fixed="right">
+        <template #default="{ row }">
+          <el-button link type="primary" @click="$router.push(`/transfer/detail/${row.transferNo}`)">详情</el-button>
+          <el-button v-for="btn in getActions(row)" :key="btn.event" link :type="btn.type" @click="handleAction(row, btn.event)">
+            {{ btn.label }}
+          </el-button>
+        </template>
+      </el-table-column>
+    </el-table>
+
+    <el-pagination
+      v-model:current-page="queryParams.pageNum"
+      v-model:page-size="queryParams.pageSize"
+      :total="total"
+      :page-sizes="[10, 20, 50]"
+      layout="total, sizes, prev, pager, next"
+      class="pagination"
+      @change="fetchData"
+    />
+
+    <!-- Create dialog -->
+    <el-dialog v-model="dialogVisible" title="手动创建调拨单" width="480px" @close="resetCreateForm">
+      <el-form ref="createFormRef" :model="createForm" :rules="createRules" label-width="110px">
+        <el-form-item label="SKU" prop="skuId">
+          <SkuSelector v-model="createForm.skuId" />
+        </el-form-item>
+        <el-form-item label="源仓库" prop="sourceWarehouseId">
+          <WarehouseSelector v-model="createForm.sourceWarehouseId" />
+        </el-form-item>
+        <el-form-item label="目标仓库" prop="targetWarehouseId">
+          <WarehouseSelector v-model="createForm.targetWarehouseId" />
+        </el-form-item>
+        <el-form-item label="调拨数量" prop="transferQuantity">
+          <el-input-number v-model="createForm.transferQuantity" :min="1" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="dialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="creating" @click="handleCreate">确定</el-button>
+      </template>
+    </el-dialog>
+  </PageContainer>
+</template>
+
+<script setup lang="ts">
+import { ref, reactive, onMounted } from 'vue'
+import { useRouter } from 'vue-router'
+import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
+import { Plus } from '@element-plus/icons-vue'
+import { getTransferOrderPage, createTransferOrder, submitTransferOrder, cancelTransferOrder } from '@/api/transfer'
+import { TransferOrderStatusMap } from '@/utils/constants'
+import PageContainer from '@/components/PageContainer.vue'
+import StatusTag from '@/components/StatusTag.vue'
+import SkuSelector from '@/components/SkuSelector.vue'
+import WarehouseSelector from '@/components/WarehouseSelector.vue'
+import type { TransferOrder, TransferOrderStatus } from '@/types/transfer'
+
+const router = useRouter()
+const loading = ref(false)
+const creating = ref(false)
+const dialogVisible = ref(false)
+const tableData = ref<TransferOrder[]>([])
+const total = ref(0)
+const createFormRef = ref<FormInstance>()
+
+const queryParams = reactive({
+  pageNum: 1,
+  pageSize: 10,
+  status: '',
+  skuId: undefined as number | undefined
+})
+
+const createForm = reactive({
+  skuId: null as number | null,
+  sourceWarehouseId: null as number | null,
+  targetWarehouseId: null as number | null,
+  transferQuantity: 1
+})
+
+const createRules: FormRules = {
+  skuId: [{ required: true, message: '请选择SKU', trigger: 'change' }],
+  sourceWarehouseId: [{ required: true, message: '请选择源仓库', trigger: 'change' }],
+  targetWarehouseId: [{ required: true, message: '请选择目标仓库', trigger: 'change' }],
+  transferQuantity: [{ required: true, message: '请输入调拨数量', trigger: 'blur' }]
+}
+
+interface ActionBtn { label: string; event: string; type: '' | 'success' | 'warning' | 'danger' | 'info' | 'primary' }
+
+function getActions(row: TransferOrder): ActionBtn[] {
+  const status = row.status as TransferOrderStatus
+  const map: Record<string, ActionBtn[]> = {
+    CREATED: [
+      { label: '提交', event: 'submit', type: 'success' },
+      { label: '锁定库存', event: 'lock', type: 'warning' },
+      { label: '取消', event: 'cancel', type: 'danger' }
+    ],
+    STOCK_LOCKED: [{ label: '提交审批', event: 'submit', type: 'success' }],
+    APPROVED: [{ label: '开始出库', event: 'outbound', type: 'warning' }],
+    OUTBOUNDING: [{ label: '确认出库', event: 'confirmOutbound', type: 'success' }],
+    IN_TRANSIT: [{ label: '确认入库', event: 'confirmInbound', type: 'success' }]
+  }
+  return map[status] || []
+}
+
+async function fetchData() {
+  loading.value = true
+  try {
+    const params: Record<string, unknown> = { pageNum: queryParams.pageNum, pageSize: queryParams.pageSize }
+    if (queryParams.status) params.status = queryParams.status
+    if (queryParams.skuId) params.skuId = queryParams.skuId
+    const res = await getTransferOrderPage(params as Parameters<typeof getTransferOrderPage>[0])
+    tableData.value = res.records
+    total.value = res.total
+  } catch { /* handled */ }
+  finally { loading.value = false }
+}
+
+function handleSearch() { queryParams.pageNum = 1; fetchData() }
+function resetSearch() { queryParams.status = ''; queryParams.skuId = undefined; queryParams.pageNum = 1; fetchData() }
+
+async function handleAction(row: TransferOrder, event: string) {
+  try {
+    switch (event) {
+      case 'submit': await submitTransferOrder(row.transferNo); break
+      case 'cancel': await cancelTransferOrder(row.transferNo); break
+      case 'lock': await import('@/api/transfer').then(m => m.lockStock(row.transferNo)); break
+      case 'outbound': await import('@/api/transfer').then(m => m.startOutbound(row.transferNo)); break
+      case 'confirmOutbound': await import('@/api/transfer').then(m => m.confirmOutbound(row.transferNo)); break
+      case 'confirmInbound': await import('@/api/transfer').then(m => m.confirmInbound(row.transferNo)); break
+    }
+    ElMessage.success('操作成功')
+    fetchData()
+  } catch { /* handled */ }
+}
+
+function resetCreateForm() {
+  createForm.skuId = null
+  createForm.sourceWarehouseId = null
+  createForm.targetWarehouseId = null
+  createForm.transferQuantity = 1
+  createFormRef.value?.resetFields()
+}
+
+async function handleCreate() {
+  if (!createFormRef.value) return
+  await createFormRef.value.validate(async (valid) => {
+    if (!valid) return
+    creating.value = true
+    try {
+      const order = await createTransferOrder({
+        skuId: createForm.skuId!,
+        sourceWarehouseId: createForm.sourceWarehouseId!,
+        targetWarehouseId: createForm.targetWarehouseId!,
+        transferQuantity: createForm.transferQuantity
+      })
+      ElMessage.success(`调拨单 ${order.transferNo} 创建成功`)
+      dialogVisible.value = false
+      router.push(`/transfer/detail/${order.transferNo}`)
+    } catch { /* handled */ }
+    finally { creating.value = false }
+  })
+}
+
+onMounted(() => fetchData())
+</script>
+
+<style scoped>
+.search-bar { padding: 16px; margin-bottom: 12px; background: #fff; border-radius: 4px; }
+.toolbar { margin-bottom: 12px; }
+.pagination { margin-top: 16px; justify-content: flex-end; }
+</style>

@@ -13,7 +13,7 @@
     <artifactId>sits-inventory</artifactId>
     <packaging>jar</packaging>
     <name>SITS Inventory</name>
-    <description>Inventory core: stock management, inventory flows, Redis cache</description>
+    <description>Inventory core: stock management, inventory flows</description>
 
     <dependencies>
         <dependency>
@@ -21,11 +21,6 @@
             <artifactId>sits-common</artifactId>
         </dependency>
 
-        <!-- Redisson -->
-        <dependency>
-            <groupId>org.redisson</groupId>
-            <artifactId>redisson-spring-boot-starter</artifactId>
-        </dependency>
     </dependencies>
 
 </project>

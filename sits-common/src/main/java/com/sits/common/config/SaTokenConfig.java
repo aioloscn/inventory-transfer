@@ -32,9 +32,11 @@ public class SaTokenConfig implements WebMvcConfigurer {
             SaRouter.match("/api/ai/**")
                     .check(r -> StpUtil.checkLogin());
 
-            // --- ADMIN only: warehouse/SKU CRUD, risk management ---
+            // --- ADMIN only: warehouse/SKU CRUD, risk management, user & role management ---
             SaRouter.match("/api/warehouses/**")
                     .match("/api/skus/**")
+                    .match("/api/users/**")
+                    .match("/api/roles/**")
                     .check(r -> StpUtil.checkRoleOr("ADMIN"));
 
             // --- Inventory read — any logged-in user ---
@@ -52,6 +54,10 @@ public class SaTokenConfig implements WebMvcConfigurer {
             // --- Risk & suggestions — ADMIN, OPERATOR ---
             SaRouter.match("/api/risks/**")
                     .check(r -> StpUtil.checkRoleOr("ADMIN", "OPERATOR"));
+
+            // --- Rule config — ADMIN only ---
+            SaRouter.match("/api/rules/**")
+                    .check(r -> StpUtil.checkRoleOr("ADMIN"));
 
             // --- All other APIs require login ---
             SaRouter.match("/api/**")

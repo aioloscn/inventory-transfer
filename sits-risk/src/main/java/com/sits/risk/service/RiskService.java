@@ -1,5 +1,7 @@
 package com.sits.risk.service;
 
+import com.sits.common.base.PageQuery;
+import com.sits.common.base.PageResult;
 import com.sits.risk.entity.CompensationTask;
 import com.sits.risk.entity.InventoryRisk;
 import com.sits.risk.entity.MqConsumeRecord;
@@ -32,9 +34,14 @@ public interface RiskService {
     List<InventoryRisk> scanRisks();
 
     /**
-     * Query risks with optional filters.
+     * Query risks with optional filters (paginated).
      */
-    List<InventoryRisk> listRisks(Long skuId, Long warehouseId, String riskType, String status);
+    PageResult<InventoryRisk> pageRisks(PageQuery pageQuery, Long skuId, Long warehouseId, String riskType, String riskLevel, String status);
+
+    /**
+     * Get risk by primary key.
+     */
+    InventoryRisk getRiskById(Long riskId);
 
     /**
      * Update risk status.
@@ -53,9 +60,14 @@ public interface RiskService {
     List<TransferSuggestion> generateSuggestions();
 
     /**
-     * Query suggestions with optional filters.
+     * Query suggestions with optional filters (paginated).
      */
-    List<TransferSuggestion> listSuggestions(Long skuId, String status);
+    PageResult<TransferSuggestion> pageSuggestions(PageQuery pageQuery, Long skuId, String status);
+
+    /**
+     * 根据主键查询调拨建议详情，不存在则抛异常。
+     */
+    TransferSuggestion getSuggestionById(Long suggestionId);
 
     /**
      * Confirm a suggestion (mark as CONFIRMED).
@@ -71,6 +83,17 @@ public interface RiskService {
      * Mark a suggestion as converted to transfer order.
      */
     void markSuggestionConverted(Long suggestionId);
+
+    /**
+     * 将已确认的调拨建议转为正式的调拨单。
+     *
+     * <p>会实际调用 {@code TransferOrderService.create()} 创建调拨单，
+     * 然后将建议状态标记为 CONVERTED。
+     *
+     * @param suggestionId 调拨建议主键
+     * @return 生成的调拨单号
+     */
+    String convertToTransferOrder(Long suggestionId);
 
     // ==================== Compensation Tasks ====================
 
