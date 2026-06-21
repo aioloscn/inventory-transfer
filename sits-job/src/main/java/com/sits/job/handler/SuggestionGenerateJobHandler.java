@@ -26,7 +26,7 @@ public class SuggestionGenerateJobHandler {
     public void execute() {
         log.info(">>>>>>>>>>> XXL-Job: transferSuggestionGenerateJob start");
         try {
-            var suggestions = riskService.generateSuggestions();
+            var suggestions = riskService.generateSuggestions(null);
             log.info(">>>>>>>>>>> XXL-Job: transferSuggestionGenerateJob done, generated {} suggestions",
                     suggestions.size());
         } catch (Exception e) {

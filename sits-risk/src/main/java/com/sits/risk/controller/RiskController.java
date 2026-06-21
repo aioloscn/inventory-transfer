@@ -3,6 +3,7 @@ package com.sits.risk.controller;
 import com.sits.common.base.PageQuery;
 import com.sits.common.base.PageResult;
 import com.sits.common.base.Result;
+import com.sits.risk.dto.GenerateSuggestionsRequest;
 import com.sits.risk.dto.RiskScanResult;
 import com.sits.risk.entity.CompensationTask;
 import com.sits.risk.entity.InventoryRisk;
@@ -75,8 +76,8 @@ public class RiskController {
     // -- Transfer suggestions --
 
     @PostMapping("/suggestions/generate")
-    public Result<List<TransferSuggestion>> generateSuggestions() {
-        return Result.success(riskService.generateSuggestions());
+    public Result<List<TransferSuggestion>> generateSuggestions(@RequestBody(required = false) GenerateSuggestionsRequest request) {
+        return Result.success(riskService.generateSuggestions(request));
     }
 
     @GetMapping("/suggestions/page")

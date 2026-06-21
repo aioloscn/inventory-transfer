@@ -2,6 +2,7 @@ package com.sits.risk.service;
 
 import com.sits.common.base.PageQuery;
 import com.sits.common.base.PageResult;
+import com.sits.risk.dto.GenerateSuggestionsRequest;
 import com.sits.risk.dto.RiskScanResult;
 import com.sits.risk.entity.CompensationTask;
 import com.sits.risk.entity.InventoryRisk;
@@ -57,13 +58,14 @@ public interface RiskService {
     // ==================== 调拨建议 ====================
 
     /**
-     * 为所有未解决的风险生成调拨建议。
-     * <p>对每个缺货风险，找到最优的有盈余的源仓库。
-     * 评分基于距离、成本、优先级。
+     * 为未解决的缺货风险生成调拨建议。
      *
+     * <p>调拨建议完全由后端规则计算，AI 仅可增强 reason 说明文本。
+     *
+     * @param request 可选请求参数（riskIds, maxCount, enableAiExplanation, dryRun），传 null 使用默认值
      * @return 生成的建议列表
      */
-    List<TransferSuggestion> generateSuggestions();
+    List<TransferSuggestion> generateSuggestions(GenerateSuggestionsRequest request);
 
     /**
      * 分页查询调拨建议，支持多条件筛选。

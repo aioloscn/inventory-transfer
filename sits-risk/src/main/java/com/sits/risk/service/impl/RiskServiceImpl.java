@@ -18,7 +18,9 @@ import com.sits.inventory.entity.SalesStatDaily;
 import com.sits.inventory.entity.WarehouseInventory;
 import com.sits.inventory.mapper.SalesStatDailyMapper;
 import com.sits.inventory.mapper.WarehouseInventoryMapper;
+import com.sits.risk.dto.GenerateSuggestionsRequest;
 import com.sits.risk.dto.RiskScanResult;
+import com.sits.risk.dto.SuggestionExplainContext;
 import com.sits.risk.entity.CompensationTask;
 import com.sits.risk.entity.InventoryRisk;
 import com.sits.risk.entity.MqConsumeRecord;
@@ -28,6 +30,7 @@ import com.sits.risk.mapper.MqConsumeRecordMapper;
 import com.sits.risk.service.DistributedLockService;
 import com.sits.risk.service.RiskService;
 import com.sits.risk.service.RuleConfigService;
+import com.sits.risk.service.TransferSuggestionExplanationEnhancer;
 import com.sits.transfer.entity.TransferOrder;
 import com.sits.transfer.entity.TransferSuggestion;
 import com.sits.transfer.mapper.TransferSuggestionMapper;
@@ -50,6 +53,7 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
@@ -93,6 +97,7 @@ public class RiskServiceImpl implements RiskService {
     private final RuleConfigService ruleConfigService;
     private final SkuMapper skuMapper;
     private final DistributedLockService lockService;
+    private final TransferSuggestionExplanationEnhancer enhancer;
 
     @Autowired
     @Lazy
@@ -108,7 +113,8 @@ public class RiskServiceImpl implements RiskService {
                            TransferOrderService transferOrderService,
                            RuleConfigService ruleConfigService,
                            SkuMapper skuMapper,
-                           DistributedLockService lockService) {
+                           DistributedLockService lockService,
+                           @Lazy TransferSuggestionExplanationEnhancer enhancer) {
         this.riskMapper = riskMapper;
         this.inventoryMapper = inventoryMapper;
         this.salesStatMapper = salesStatMapper;
@@ -120,6 +126,7 @@ public class RiskServiceImpl implements RiskService {
         this.ruleConfigService = ruleConfigService;
         this.skuMapper = skuMapper;
         this.lockService = lockService;
+        this.enhancer = enhancer;
     }
 
     // ==================== 风险扫描 ====================
@@ -434,77 +441,341 @@ public class RiskServiceImpl implements RiskService {
 
     // ==================== 调拨建议 ====================
 
+    /** 不应重复生成建议的状态集合 */
+    private static final Set<String> ACTIVE_SUGGESTION_STATUSES = Set.of(
+            SuggestionStatus.GENERATED.name(),
+            SuggestionStatus.CONFIRMED.name(),
+            SuggestionStatus.CONVERTED.name()
+    );
+
     @Override
     @Transactional
-    public List<TransferSuggestion> generateSuggestions() {
-        log.info("Generating transfer suggestions...");
+    public List<TransferSuggestion> generateSuggestions(GenerateSuggestionsRequest request) {
+        if (request == null) {
+            request = new GenerateSuggestionsRequest();
+        }
 
-        List<InventoryRisk> shortageRisks = riskMapper.selectList(
-                new LambdaQueryWrapper<InventoryRisk>()
-                        .eq(InventoryRisk::getRiskType, RiskType.SHORTAGE.name())
-                        .eq(InventoryRisk::getStatus, RiskStatus.NEW.name())
-        );
+        final int maxCount = request.getMaxCountOrDefault();
+        final boolean dryRun = request.isDryRun();
 
+        log.info("Generating transfer suggestions: maxCount={}, dryRun={}", maxCount, dryRun);
+
+        // 1. 查询需要生成建议的风险（批量，按排序 + 限制）
+        List<InventoryRisk> targetRisks = queryTargetRisks(request, maxCount);
+        if (targetRisks.isEmpty()) {
+            log.info("No target risks found for suggestion generation.");
+            return List.of();
+        }
+
+        // 2. 批量加载仓库 Map
         Map<Long, Warehouse> warehouseMap = loadWarehouseMap();
+
+        // 3. 提取 skuId 集合，批量查询库存
+        Set<Long> skuIdSet = targetRisks.stream().map(InventoryRisk::getSkuId).collect(Collectors.toSet());
+        List<WarehouseInventory> allInventories = inventoryMapper.selectBySkuIds(new ArrayList<>(skuIdSet));
+        Map<Long, List<WarehouseInventory>> inventoryBySku = allInventories.stream()
+                .collect(Collectors.groupingBy(WarehouseInventory::getSkuId));
+
         List<TransferSuggestion> suggestions = new ArrayList<>();
 
-        for (InventoryRisk risk : shortageRisks) {
-            Warehouse targetWarehouse = warehouseMap.get(risk.getWarehouseId());
-            if (targetWarehouse == null) continue;
-
-            List<WarehouseInventory> inventories = inventoryMapper.selectList(
-                    new LambdaQueryWrapper<WarehouseInventory>()
-                            .eq(WarehouseInventory::getSkuId, risk.getSkuId())
-            );
-
-            int shortageQty = getShortageQuantity(risk);
-            if (shortageQty <= 0) continue;
-
-            List<CandidateSource> candidates = new ArrayList<>();
-            for (WarehouseInventory inv : inventories) {
-                if (inv.getWarehouseId().equals(risk.getWarehouseId())) continue;
-                int surplus = getSurplus(inv);
-                if (surplus < shortageQty) continue;
-                Warehouse sourceWh = warehouseMap.get(inv.getWarehouseId());
-                if (sourceWh == null) continue;
-                int suggestQty = Math.min(surplus, shortageQty);
-                BigDecimal score = computeScore(risk, inv, sourceWh, targetWarehouse, suggestQty);
-                candidates.add(new CandidateSource(inv, sourceWh, suggestQty, score));
-            }
-
-            candidates.sort(Comparator.comparing(CandidateSource::score).reversed());
-            if (candidates.isEmpty()) {
-                log.info("No suitable source warehouse for risk: {}", risk.getRiskNo());
+        for (InventoryRisk risk : targetRisks) {
+            // 幂等检查：已存在活跃状态的建议则跳过
+            if (!dryRun && hasActiveSuggestion(risk.getId())) {
+                log.debug("Skip risk {} - active suggestion already exists", risk.getRiskNo());
                 continue;
             }
 
-            CandidateSource best = candidates.get(0);
+            Warehouse targetWarehouse = warehouseMap.get(risk.getWarehouseId());
+            if (targetWarehouse == null) continue;
 
-            TransferSuggestion suggestion = new TransferSuggestion();
-            suggestion.setSuggestionNo(NoGenerator.generateSuggestionNo());
-            suggestion.setRiskId(risk.getId());
-            suggestion.setSkuId(risk.getSkuId());
-            suggestion.setSourceWarehouseId(best.inv().getWarehouseId());
-            suggestion.setTargetWarehouseId(risk.getWarehouseId());
-            suggestion.setSuggestQuantity(best.quantity());
-            suggestion.setScore(best.score());
-            suggestion.setReason(String.format(
-                    "仓库[%s] %s 库存不足(可支撑%s天)，建议从仓库[%s]调拨%d件",
-                    targetWarehouse.getWarehouseName(), risk.getSkuId(),
-                    risk.getSupportDays(), best.warehouse().getWarehouseName(), best.quantity()));
-            suggestion.setStatus(SuggestionStatus.GENERATED.name());
-            int expireDays = ruleConfigService.getIntValue(KEY_SUGGESTION_EXPIRE, 7);
-            suggestion.setExpireTime(LocalDateTime.now().plusDays(expireDays));
+            List<WarehouseInventory> skuInventories = inventoryBySku.getOrDefault(risk.getSkuId(), List.of());
 
-            suggestionMapper.insert(suggestion);
-            suggestions.add(suggestion);
+            // 查找目标仓库存
+            WarehouseInventory targetInv = skuInventories.stream()
+                    .filter(i -> i.getWarehouseId().equals(risk.getWarehouseId()))
+                    .findFirst().orElse(null);
 
-            risk.setStatus(RiskStatus.PROCESSING.name());
-            riskMapper.updateById(risk);
+            // 计算缺口
+            int shortageQty = calculateShortageQuantity(risk, targetInv);
+            if (shortageQty <= 0) continue;
+
+            // 构建候选源仓
+            List<CandidateSource> candidates = buildSuggestionCandidates(risk, targetWarehouse, skuInventories, warehouseMap, shortageQty);
+
+            // 多源仓补足缺口
+            int remaining = shortageQty;
+            for (CandidateSource c : candidates) {
+                if (remaining <= 0) break;
+
+                int qty = Math.min(remaining, c.transferableStock());
+                if (qty <= 0) continue;
+
+                String baseReason = buildBaseReason(risk, targetWarehouse, targetInv, c.warehouse(), c.inv(), c.transferableStock(), qty);
+
+                String finalReason = baseReason;
+                SuggestionExplainContext ctx = buildExplainContext(risk, targetWarehouse, targetInv,
+                        c.warehouse(), c.inv(), c.transferableStock(), qty, c.score(), baseReason);
+                finalReason = enhancer.enhance(ctx);
+                if (finalReason == null || finalReason.isBlank()) {
+                    finalReason = baseReason;
+                }
+
+                TransferSuggestion suggestion = new TransferSuggestion();
+                suggestion.setSuggestionNo(NoGenerator.generateSuggestionNo());
+                suggestion.setRiskId(risk.getId());
+                suggestion.setSkuId(risk.getSkuId());
+                suggestion.setSourceWarehouseId(c.inv().getWarehouseId());
+                suggestion.setTargetWarehouseId(risk.getWarehouseId());
+                suggestion.setSuggestQuantity(qty);
+                suggestion.setScore(c.score());
+                suggestion.setReason(finalReason);
+                suggestion.setStatus(SuggestionStatus.GENERATED.name());
+                int expireDays = ruleConfigService.getIntValue(KEY_SUGGESTION_EXPIRE, 7);
+                suggestion.setExpireTime(LocalDateTime.now().plusDays(expireDays));
+
+                if (!dryRun) {
+                    suggestionMapper.insert(suggestion);
+                }
+
+                suggestions.add(suggestion);
+                remaining -= qty;
+            }
+
+            // 更新风险状态
+            if (!dryRun) {
+                risk.setStatus(RiskStatus.PROCESSING.name());
+                riskMapper.updateById(risk);
+            }
         }
 
-        log.info("Generated {} transfer suggestions.", suggestions.size());
+        log.info("Generated {} transfer suggestions (dryRun={}).", suggestions.size(), dryRun);
         return suggestions;
+    }
+
+    /**
+     * 查询需要生成建议的目标风险。
+     */
+    private List<InventoryRisk> queryTargetRisks(GenerateSuggestionsRequest request, int maxCount) {
+        LambdaQueryWrapper<InventoryRisk> wrapper = new LambdaQueryWrapper<InventoryRisk>()
+                .eq(InventoryRisk::getRiskType, RiskType.SHORTAGE.name())
+                .eq(InventoryRisk::getStatus, RiskStatus.NEW.name());
+
+        if (request.getRiskIds() != null && !request.getRiskIds().isEmpty()) {
+            wrapper.in(InventoryRisk::getId, request.getRiskIds());
+        }
+
+        // 按风险等级优先级 + supportDays + 创建时间排序
+        wrapper.orderByAsc(InventoryRisk::getRiskLevel);
+        wrapper.orderByAsc(InventoryRisk::getSupportDays);
+        wrapper.orderByDesc(InventoryRisk::getCreateTime);
+        wrapper.last("LIMIT " + maxCount);
+
+        return riskMapper.selectList(wrapper);
+    }
+
+    /**
+     * 检查是否存在活跃状态的调拨建议（幂等防重复）。
+     */
+    private boolean hasActiveSuggestion(Long riskId) {
+        return suggestionMapper.selectCount(
+                new LambdaQueryWrapper<TransferSuggestion>()
+                        .eq(TransferSuggestion::getRiskId, riskId)
+                        .in(TransferSuggestion::getStatus, ACTIVE_SUGGESTION_STATUSES)
+        ) > 0;
+    }
+
+    /**
+     * 计算目标仓缺口数量。
+     */
+    private int calculateShortageQuantity(InventoryRisk risk, WarehouseInventory targetInventory) {
+        int targetSafety = targetInventory != null && targetInventory.getSafetyStock() != null
+                ? targetInventory.getSafetyStock() : 0;
+        int targetAvailable = targetInventory != null && targetInventory.getAvailableStock() != null
+                ? targetInventory.getAvailableStock() : 0;
+        int targetInTransit = targetInventory != null && targetInventory.getInTransitStock() != null
+                ? targetInventory.getInTransitStock() : 0;
+
+        int targetEffective = targetAvailable + targetInTransit;
+
+        // 按安全库存计算缺口
+        int shortageBySafety = targetSafety - targetEffective;
+
+        // 按支撑天数计算缺口
+        BigDecimal avgDaily = risk.getAvgDailySales();
+        int shortageBySupport = 0;
+        if (avgDaily != null && avgDaily.compareTo(BigDecimal.ZERO) > 0) {
+            int supportDaysTarget = ruleConfigService.getIntValue(KEY_SHORTAGE_MEDIUM, 7);
+            int requiredStock = avgDaily.multiply(BigDecimal.valueOf(supportDaysTarget))
+                    .setScale(0, RoundingMode.CEILING).intValue();
+            shortageBySupport = requiredStock - targetEffective;
+        }
+
+        // 可以结合 riskLevel 调整：HIGH 等级使用 shortage_high_days
+        if (RiskLevel.HIGH.name().equals(risk.getRiskLevel()) && avgDaily != null && avgDaily.compareTo(BigDecimal.ZERO) > 0) {
+            int highDays = ruleConfigService.getIntValue(KEY_SHORTAGE_HIGH, 3);
+            BigDecimal requiredForRecovery = avgDaily.multiply(BigDecimal.valueOf(highDays + 3));
+            int shortageByHigh = requiredForRecovery.setScale(0, RoundingMode.CEILING).intValue() - targetEffective;
+            return Math.max(0, Math.max(shortageByHigh, Math.max(shortageBySafety, shortageBySupport)));
+        }
+
+        return Math.max(0, Math.max(shortageBySafety, shortageBySupport));
+    }
+
+    /**
+     * 计算源仓可调拨数量。
+     * <p>可调拨 = 可用库存 - 安全库存，不减去在途库存。
+     */
+    private int calculateTransferableStock(WarehouseInventory inv) {
+        int available = inv.getAvailableStock() != null ? inv.getAvailableStock() : 0;
+        int safety = inv.getSafetyStock() != null ? inv.getSafetyStock() : 0;
+        return Math.max(0, available - safety);
+    }
+
+    /**
+     * 构建候选源仓列表（只筛选 transferableStock > 0 的仓库）。
+     */
+    private List<CandidateSource> buildSuggestionCandidates(
+            InventoryRisk risk,
+            Warehouse targetWarehouse,
+            List<WarehouseInventory> skuInventories,
+            Map<Long, Warehouse> warehouseMap,
+            int shortageQty) {
+
+        List<CandidateSource> candidates = new ArrayList<>();
+        for (WarehouseInventory inv : skuInventories) {
+            if (inv.getWarehouseId().equals(risk.getWarehouseId())) continue;
+
+            Warehouse sourceWh = warehouseMap.get(inv.getWarehouseId());
+            if (sourceWh == null) continue;
+
+            int transferable = calculateTransferableStock(inv);
+            if (transferable <= 0) continue;
+
+            BigDecimal score = scoreCandidate(risk, inv, sourceWh, targetWarehouse, transferable);
+            candidates.add(new CandidateSource(inv, sourceWh, transferable, score));
+        }
+
+        candidates.sort(Comparator.comparing(CandidateSource::score).reversed());
+        return candidates;
+    }
+
+    /**
+     * 计算候选源仓评分。
+     */
+    private BigDecimal scoreCandidate(InventoryRisk risk, WarehouseInventory inv,
+                                      Warehouse sourceWh, Warehouse targetWh, int transferableStock) {
+        BigDecimal score = BigDecimal.ZERO;
+
+        // 风险等级因子
+        String level = risk.getRiskLevel();
+        if (RiskLevel.HIGH.name().equals(level)) {
+            score = score.add(BigDecimal.valueOf(50));
+        } else if (RiskLevel.MEDIUM.name().equals(level)) {
+            score = score.add(BigDecimal.valueOf(30));
+        } else {
+            score = score.add(BigDecimal.valueOf(10));
+        }
+
+        // supportDays 越低，分越高
+        BigDecimal sd = risk.getSupportDays();
+        if (sd != null) {
+            if (sd.compareTo(BigDecimal.valueOf(1)) <= 0) {
+                score = score.add(BigDecimal.valueOf(20));
+            } else if (sd.compareTo(BigDecimal.valueOf(3)) <= 0) {
+                score = score.add(BigDecimal.valueOf(12));
+            } else if (sd.compareTo(BigDecimal.valueOf(7)) <= 0) {
+                score = score.add(BigDecimal.valueOf(6));
+            }
+        }
+
+        // 仓库优先级
+        score = score.add(BigDecimal.valueOf(sourceWh.getPriority() != null ? sourceWh.getPriority() : 0));
+
+        // 可调拨盈余比例
+        int available = inv.getAvailableStock() != null ? inv.getAvailableStock() : 1;
+        if (available > 0 && transferableStock > 0) {
+            BigDecimal ratio = BigDecimal.valueOf(transferableStock)
+                    .divide(BigDecimal.valueOf(available), 2, RoundingMode.HALF_UP);
+            score = score.add(ratio.multiply(BigDecimal.TEN));
+        }
+
+        // 同区域加分
+        if (sourceWh.getRegion() != null && sourceWh.getRegion().equals(targetWh.getRegion())) {
+            score = score.add(BigDecimal.valueOf(8));
+        }
+        // 同省加分
+        if (sourceWh.getProvince() != null && sourceWh.getProvince().equals(targetWh.getProvince())) {
+            score = score.add(BigDecimal.valueOf(5));
+        }
+
+        return score.setScale(2, RoundingMode.HALF_UP);
+    }
+
+    /**
+     * 构建基础 reason 文本。
+     */
+    private String buildBaseReason(InventoryRisk risk, Warehouse targetWh, WarehouseInventory targetInv,
+                                   Warehouse sourceWh, WarehouseInventory sourceInv,
+                                   int sourceTransferable, int suggestQty) {
+        int targetAvail = targetInv != null && targetInv.getAvailableStock() != null ? targetInv.getAvailableStock() : 0;
+        int targetTransit = targetInv != null && targetInv.getInTransitStock() != null ? targetInv.getInTransitStock() : 0;
+        int targetSafety = targetInv != null && targetInv.getSafetyStock() != null ? targetInv.getSafetyStock() : 0;
+        BigDecimal avgSales = risk.getAvgDailySales();
+        BigDecimal sd = risk.getSupportDays();
+        int sourceAvail = sourceInv.getAvailableStock() != null ? sourceInv.getAvailableStock() : 0;
+        int sourceSafety = sourceInv.getSafetyStock() != null ? sourceInv.getSafetyStock() : 0;
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("SKU[").append(risk.getSkuId()).append("] 在目标仓[")
+                .append(targetWh.getWarehouseName()).append("]存在 ").append(risk.getRiskLevel())
+                .append(" 缺货风险：");
+        sb.append("当前可用库存 ").append(targetAvail);
+        sb.append("，在途 ").append(targetTransit);
+        sb.append("，安全库存 ").append(targetSafety);
+        if (avgSales != null && avgSales.compareTo(BigDecimal.ZERO) > 0) {
+            sb.append("，日均销量 ").append(avgSales.setScale(2, RoundingMode.HALF_UP));
+        }
+        if (sd != null) {
+            sb.append("，可支撑 ").append(sd.setScale(2, RoundingMode.HALF_UP)).append(" 天");
+        }
+        sb.append("。源仓[").append(sourceWh.getWarehouseName()).append("]");
+        sb.append("可用库存 ").append(sourceAvail);
+        sb.append("，安全库存 ").append(sourceSafety);
+        sb.append("，可调拨 ").append(sourceTransferable);
+        sb.append("。建议调拨 ").append(suggestQty).append(" 件");
+        if (sd != null && sd.compareTo(BigDecimal.valueOf(3)) <= 0) {
+            sb.append("，调拨后可缓解目标仓短期缺货风险");
+        }
+        sb.append("。");
+        return sb.toString();
+    }
+
+    /**
+     * 构建 AI 解释增强上下文。
+     */
+    private SuggestionExplainContext buildExplainContext(InventoryRisk risk, Warehouse targetWh,
+                                                          WarehouseInventory targetInv,
+                                                          Warehouse sourceWh, WarehouseInventory sourceInv,
+                                                          int sourceTransferable, int suggestQty,
+                                                          BigDecimal score, String baseReason) {
+        SuggestionExplainContext ctx = new SuggestionExplainContext();
+        ctx.setBaseReason(baseReason);
+        ctx.setRiskNo(risk.getRiskNo());
+        ctx.setSkuId(risk.getSkuId());
+        ctx.setRiskLevel(risk.getRiskLevel());
+        ctx.setTargetWarehouseName(targetWh.getWarehouseName());
+        ctx.setTargetAvailableStock(targetInv != null ? targetInv.getAvailableStock() : null);
+        ctx.setTargetSafetyStock(targetInv != null ? targetInv.getSafetyStock() : null);
+        ctx.setTargetInTransitStock(targetInv != null ? targetInv.getInTransitStock() : null);
+        ctx.setAvgDailySales(risk.getAvgDailySales());
+        ctx.setSupportDays(risk.getSupportDays());
+        ctx.setSourceWarehouseName(sourceWh.getWarehouseName());
+        ctx.setSourceAvailableStock(sourceInv.getAvailableStock());
+        ctx.setSourceSafetyStock(sourceInv.getSafetyStock());
+        ctx.setSourceTransferableStock(sourceTransferable);
+        ctx.setSuggestQuantity(suggestQty);
+        ctx.setScore(score);
+        return ctx;
     }
 
     @Override
@@ -672,51 +943,6 @@ public class RiskServiceImpl implements RiskService {
                 .collect(Collectors.toMap(Warehouse::getId, w -> w));
     }
 
-    private int getShortageQuantity(InventoryRisk risk) {
-        WarehouseInventory inv = inventoryMapper.selectOne(
-                new LambdaQueryWrapper<WarehouseInventory>()
-                        .eq(WarehouseInventory::getSkuId, risk.getSkuId())
-                        .eq(WarehouseInventory::getWarehouseId, risk.getWarehouseId())
-        );
-        if (inv == null) return 0;
-        int safety = inv.getSafetyStock() != null ? inv.getSafetyStock() : 0;
-        int available = inv.getAvailableStock() != null ? inv.getAvailableStock() : 0;
-        return Math.max(0, safety - available);
-    }
-
-    private int getSurplus(WarehouseInventory inv) {
-        int safety = inv.getSafetyStock() != null ? inv.getSafetyStock() : 0;
-        int available = inv.getAvailableStock() != null ? inv.getAvailableStock() : 0;
-        int inTransit = inv.getInTransitStock() != null ? inv.getInTransitStock() : 0;
-        return Math.max(0, available - safety - inTransit);
-    }
-
-    private BigDecimal computeScore(InventoryRisk risk, WarehouseInventory inv,
-                                     Warehouse sourceWh, Warehouse targetWh, int suggestQty) {
-        BigDecimal score = BigDecimal.ZERO;
-
-        BigDecimal supportDays = risk.getSupportDays() != null ? risk.getSupportDays() : BigDecimal.ZERO;
-        if (supportDays.compareTo(BigDecimal.valueOf(1)) <= 0) {
-            score = score.add(BigDecimal.valueOf(50));
-        } else if (supportDays.compareTo(BigDecimal.valueOf(3)) <= 0) {
-            score = score.add(BigDecimal.valueOf(30));
-        } else {
-            score = score.add(BigDecimal.valueOf(10));
-        }
-
-        score = score.add(BigDecimal.valueOf(sourceWh.getPriority() != null ? sourceWh.getPriority() : 0));
-
-        int surplus = getSurplus(inv);
-        if (surplus > 0) {
-            BigDecimal ratio = BigDecimal.valueOf(surplus)
-                    .divide(BigDecimal.valueOf(Math.max(1, inv.getAvailableStock() != null ? inv.getAvailableStock() : 1)),
-                            2, RoundingMode.HALF_UP);
-            score = score.add(ratio.multiply(BigDecimal.TEN));
-        }
-
-        return score.setScale(2, RoundingMode.HALF_UP);
-    }
-
     private TransferSuggestion getSuggestionOrThrow(Long suggestionId) {
         TransferSuggestion s = suggestionMapper.selectById(suggestionId);
         if (s == null) throw new BusinessException("调拨建议不存在: " + suggestionId);
@@ -724,5 +950,5 @@ public class RiskServiceImpl implements RiskService {
     }
 
     private record CandidateSource(WarehouseInventory inv, Warehouse warehouse,
-                                    int quantity, BigDecimal score) {}
+                                    int transferableStock, BigDecimal score) {}
 }
