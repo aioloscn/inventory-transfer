@@ -19,22 +19,22 @@ public interface TransferOrderService {
                          int quantity, Long applicantId);
 
     /**
-     * Lock stock at source warehouse (CREATED -> STOCK_LOCKED).
-     */
-    void lockStock(String transferNo, String operator);
-
-    /**
-     * Submit for approval (STOCK_LOCKED -> APPROVING).
+     * Submit for approval (CREATED -> APPROVING).
+     * Validates stock availability only — does NOT lock stock.
+     * Creates an ApprovalRecord (PENDING) for the approval center.
      */
     void submitApproval(String transferNo, String operator);
 
     /**
      * Approve the transfer (APPROVING -> APPROVED).
+     * Conditionally locks stock (available >= qty) and creates reservation record within transaction.
+     * If stock lock fails, the entire transaction rolls back.
      */
     void approve(String transferNo, String approver, String comment);
 
     /**
-     * Reject the transfer (APPROVING -> REJECTED). Stock is released.
+     * Reject the transfer (APPROVING -> REJECTED).
+     * No stock release needed — stock was never locked.
      */
     void reject(String transferNo, String approver, String comment);
 
@@ -45,6 +45,7 @@ public interface TransferOrderService {
 
     /**
      * Confirm outbound success (OUTBOUNDING -> OUTBOUNDED).
+     * Deducts actual stock (locked->in_transit) and writes off reservation.
      */
     void outboundSuccess(String transferNo, String operator);
 
@@ -64,7 +65,8 @@ public interface TransferOrderService {
     void inboundSuccess(String transferNo, String operator);
 
     /**
-     * Cancel transfer order (CREATED / STOCK_LOCKED -> CANCELLED).
+     * Cancel transfer order (CREATED / APPROVING / APPROVED -> CANCELLED).
+     * If APPROVED, releases reserved stock.
      */
     void cancel(String transferNo, String operator);
 

@@ -1,9 +1,14 @@
 package com.sits.common.config;
 
+import cn.dev33.satoken.dao.SaTokenDao;
+import cn.dev33.satoken.dao.SaTokenDaoRedisJackson;
 import cn.dev33.satoken.interceptor.SaInterceptor;
 import cn.dev33.satoken.router.SaRouter;
 import cn.dev33.satoken.stp.StpUtil;
+import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Primary;
+import org.springframework.data.redis.connection.RedisConnectionFactory;
 import org.springframework.web.servlet.config.annotation.InterceptorRegistry;
 import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 
@@ -20,6 +25,19 @@ import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
  */
 @Configuration
 public class SaTokenConfig implements WebMvcConfigurer {
+
+    /**
+     * 手动注册 SaTokenDao，使用 Redis + Jackson 序列化持久化 Token。
+     * sa-token-redis-jackson 1.38.0 的自动配置只注册了无参构造的 Bean，
+     * 未调用 init() 注入 RedisConnectionFactory，需手动初始化。
+     */
+    @Primary
+    @Bean
+    public SaTokenDao saTokenDao(RedisConnectionFactory redisConnectionFactory) {
+        SaTokenDaoRedisJackson dao = new SaTokenDaoRedisJackson();
+        dao.init(redisConnectionFactory);
+        return dao;
+    }
 
     @Override
     public void addInterceptors(InterceptorRegistry registry) {

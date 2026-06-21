@@ -1,17 +1,25 @@
 package com.sits.transfer.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
+import com.sits.common.mapper.ApprovalRecordMapper;
 import com.sits.common.base.PageQuery;
 import com.sits.common.base.PageResult;
+import com.sits.common.entity.ApprovalRecord;
+import com.sits.common.enums.ReservationStatus;
 import com.sits.common.enums.TransferOrderEvent;
 import com.sits.common.enums.TransferOrderStatus;
 import com.sits.common.exception.BusinessException;
 import com.sits.common.exception.StateTransitionException;
+import com.sits.common.exception.StockInsufficientException;
 import com.sits.common.util.NoGenerator;
+import com.sits.inventory.entity.InventoryReservation;
 import com.sits.inventory.entity.WarehouseInventory;
+import com.sits.inventory.mapper.InventoryReservationMapper;
 import com.sits.inventory.service.InventoryService;
 import com.sits.transfer.entity.TransferOrder;
 import com.sits.transfer.entity.TransferOrderLog;
+import com.sits.transfer.event.TransferEventProducer;
 import com.sits.transfer.mapper.TransferOrderLogMapper;
 import com.sits.transfer.mapper.TransferOrderMapper;
 import com.sits.transfer.service.TransferOrderService;
@@ -20,24 +28,27 @@ import org.slf4j.LoggerFactory;
 import org.springframework.messaging.Message;
 import org.springframework.messaging.support.MessageBuilder;
 import org.springframework.statemachine.StateMachine;
+import org.springframework.statemachine.StateMachineEventResult;
 import org.springframework.statemachine.config.StateMachineFactory;
-import org.springframework.statemachine.persist.StateMachinePersister;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.math.BigDecimal;
 import java.util.List;
 
 /**
  * TransferOrderService implementation.
  *
  * <p>Uses Spring StateMachine to drive status transitions.
- * Each transition:
+ * <p>Stock is locked on approval (not before), avoiding long-term stock occupation during review.
+ *
+ * <p>Core formula: available_stock = actual_stock - reserved_stock
+ *
+ * <p>Each transition:
  * <ol>
  *   <li>Sends the event to the state machine — validates the transition is legal.</li>
  *   <li>Updates the transfer_order.status in DB.</li>
  *   <li>Records a transfer_order_log entry.</li>
- *   <li>Performs inventory operations (lock/unlock/deduct/inbound).</li>
+ *   <li>Performs inventory operations (validate/lock/release/deduct/inbound).</li>
  * </ol>
  */
 @Service
@@ -48,19 +59,26 @@ public class TransferOrderServiceImpl implements TransferOrderService {
     private final TransferOrderMapper orderMapper;
     private final TransferOrderLogMapper logMapper;
     private final InventoryService inventoryService;
+    private final InventoryReservationMapper reservationMapper;
+    private final ApprovalRecordMapper approvalRecordMapper;
     private final StateMachineFactory<TransferOrderStatus, TransferOrderEvent> stateMachineFactory;
+    private final TransferEventProducer transferEventProducer;
 
     public TransferOrderServiceImpl(TransferOrderMapper orderMapper,
                                      TransferOrderLogMapper logMapper,
                                      InventoryService inventoryService,
-                                     StateMachineFactory<TransferOrderStatus, TransferOrderEvent> stateMachineFactory) {
+                                     InventoryReservationMapper reservationMapper,
+                                     ApprovalRecordMapper approvalRecordMapper,
+                                     StateMachineFactory<TransferOrderStatus, TransferOrderEvent> stateMachineFactory,
+                                     TransferEventProducer transferEventProducer) {
         this.orderMapper = orderMapper;
         this.logMapper = logMapper;
         this.inventoryService = inventoryService;
+        this.reservationMapper = reservationMapper;
+        this.approvalRecordMapper = approvalRecordMapper;
         this.stateMachineFactory = stateMachineFactory;
+        this.transferEventProducer = transferEventProducer;
     }
-
-    // ==================== CREATE ====================
 
     @Override
     @Transactional
@@ -88,76 +106,82 @@ public class TransferOrderServiceImpl implements TransferOrderService {
         recordLog(order, null, TransferOrderStatus.CREATED, "CREATE", null);
 
         log.info("Transfer order created: {}", order.getTransferNo());
+
+        // MQ event
+        transferEventProducer.sendOrderCreated(order);
+
         return order;
     }
 
-    // ==================== LOCK STOCK ====================
-
-    @Override
-    @Transactional
-    public void lockStock(String transferNo, String operator) {
-        TransferOrder order = getOrThrow(transferNo);
-        fireEvent(order, TransferOrderEvent.LOCK_STOCK);
-
-        // Lock inventory at source warehouse
-        try {
-            inventoryService.lockStock(order.getSkuId(), order.getSourceWarehouseId(),
-                    order.getTransferQuantity(), order.getTransferNo(), operator);
-        } catch (Exception e) {
-            log.error("Stock lock failed for {}", transferNo, e);
-            throw new BusinessException("库存锁定失败: " + e.getMessage());
-        }
-
-        order.setStatus(TransferOrderStatus.STOCK_LOCKED.name());
-        orderMapper.updateById(order);
-        recordLog(order, TransferOrderStatus.CREATED, TransferOrderStatus.STOCK_LOCKED,
-                "LOCK_STOCK", operator);
-
-        log.info("Stock locked for transfer: {}", transferNo);
-    }
-
-    // ==================== SUBMIT APPROVAL ====================
-
+    // ---------------------------------------------------------------
+    // Submit for approval (CREATED -> APPROVING)
+    // Only validates stock — does NOT lock.
+    // Creates an ApprovalRecord so the approval center can process it.
+    // ---------------------------------------------------------------
     @Override
     @Transactional
     public void submitApproval(String transferNo, String operator) {
         TransferOrder order = getOrThrow(transferNo);
         fireEvent(order, TransferOrderEvent.SUBMIT_APPROVAL);
 
+        // Validate stock availability (no lock)
+        validateStockAvailability(order);
+
         order.setStatus(TransferOrderStatus.APPROVING.name());
         orderMapper.updateById(order);
-        recordLog(order, TransferOrderStatus.STOCK_LOCKED, TransferOrderStatus.APPROVING,
+        recordLog(order, TransferOrderStatus.CREATED, TransferOrderStatus.APPROVING,
                 "SUBMIT_APPROVAL", operator);
+
+        // Create approval record (approverId will be set by the actual approver)
+        createApprovalRecord(order);
+
+        log.info("Transfer submitted for approval: {}", transferNo);
     }
 
-    // ==================== APPROVE ====================
-
+    // ---------------------------------------------------------------
+    // Approve (APPROVING -> APPROVED)
+    // Conditional lock stock + create reservation record — all transactional
+    // ---------------------------------------------------------------
     @Override
     @Transactional
     public void approve(String transferNo, String approver, String comment) {
         TransferOrder order = getOrThrow(transferNo);
         fireEvent(order, TransferOrderEvent.APPROVE);
 
+        // 1) Conditionally lock stock (available -> locked, with available >= qty check)
+        try {
+            inventoryService.lockStock(order.getSkuId(), order.getSourceWarehouseId(),
+                    order.getTransferQuantity(), order.getTransferNo(), approver);
+        } catch (Exception e) {
+            log.error("Stock lock failed during approval for {}", transferNo, e);
+            throw new BusinessException("库存预占失败: " + e.getMessage());
+        }
+
+        // 2) Create reservation record (idempotent via unique key on transfer_order_id, sku_id, warehouse_id)
+        createReservation(order);
+
+        // 3) Update order status
         order.setStatus(TransferOrderStatus.APPROVED.name());
         order.setApproverId(parseApproverId(approver));
         orderMapper.updateById(order);
         recordLog(order, TransferOrderStatus.APPROVING, TransferOrderStatus.APPROVED,
                 "APPROVE", approver);
 
-        log.info("Transfer approved: {}", transferNo);
+        log.info("Transfer approved, stock reserved: {}", transferNo);
+
+        // MQ event
+        transferEventProducer.sendApprovalPassed(order);
     }
 
-    // ==================== REJECT ====================
-
+    // ---------------------------------------------------------------
+    // Reject (APPROVING -> REJECTED)
+    // No stock to release — stock was never locked
+    // ---------------------------------------------------------------
     @Override
     @Transactional
     public void reject(String transferNo, String approver, String comment) {
         TransferOrder order = getOrThrow(transferNo);
         fireEvent(order, TransferOrderEvent.REJECT);
-
-        // Release locked stock
-        inventoryService.unlockStock(order.getSkuId(), order.getSourceWarehouseId(),
-                order.getTransferQuantity(), order.getTransferNo(), approver);
 
         order.setStatus(TransferOrderStatus.REJECTED.name());
         order.setApproverId(parseApproverId(approver));
@@ -167,8 +191,6 @@ public class TransferOrderServiceImpl implements TransferOrderService {
 
         log.info("Transfer rejected: {}", transferNo);
     }
-
-    // ==================== START OUTBOUND ====================
 
     @Override
     @Transactional
@@ -182,8 +204,10 @@ public class TransferOrderServiceImpl implements TransferOrderService {
                 "START_OUTBOUND", operator);
     }
 
-    // ==================== OUTBOUND SUCCESS ====================
-
+    // ---------------------------------------------------------------
+    // Outbound success (OUTBOUNDING -> OUTBOUNDED)
+    // Deduct actual stock (locked -> in_transit) + write off reservation
+    // ---------------------------------------------------------------
     @Override
     @Transactional
     public void outboundSuccess(String transferNo, String operator) {
@@ -194,13 +218,17 @@ public class TransferOrderServiceImpl implements TransferOrderService {
         inventoryService.outboundStock(order.getSkuId(), order.getSourceWarehouseId(),
                 order.getTransferQuantity(), order.getTransferNo(), operator);
 
+        // Write off reservation
+        writeOffReservation(order.getId());
+
         order.setStatus(TransferOrderStatus.OUTBOUNDED.name());
         orderMapper.updateById(order);
         recordLog(order, TransferOrderStatus.OUTBOUNDING, TransferOrderStatus.OUTBOUNDED,
                 "OUTBOUND_SUCCESS", operator);
-    }
 
-    // ==================== START SHIP ====================
+        // MQ event
+        transferEventProducer.sendOutboundSuccess(order);
+    }
 
     @Override
     @Transactional
@@ -214,8 +242,6 @@ public class TransferOrderServiceImpl implements TransferOrderService {
                 "START_SHIP", operator);
     }
 
-    // ==================== START INBOUND ====================
-
     @Override
     @Transactional
     public void startInbound(String transferNo, String operator) {
@@ -227,8 +253,6 @@ public class TransferOrderServiceImpl implements TransferOrderService {
         recordLog(order, TransferOrderStatus.IN_TRANSIT, TransferOrderStatus.INBOUNDING,
                 "START_INBOUND", operator);
     }
-
-    // ==================== INBOUND SUCCESS ====================
 
     @Override
     @Transactional
@@ -250,29 +274,36 @@ public class TransferOrderServiceImpl implements TransferOrderService {
                 "INBOUND_SUCCESS", operator);
 
         log.info("Transfer completed: {}", transferNo);
+
+        // MQ event
+        transferEventProducer.sendInboundSuccess(order);
     }
 
-    // ==================== CANCEL ====================
-
+    // ---------------------------------------------------------------
+    // Cancel (CREATED / APPROVING / APPROVED -> CANCELLED)
+    // If APPROVED (stock was locked), release reserved stock
+    // ---------------------------------------------------------------
     @Override
     @Transactional
     public void cancel(String transferNo, String operator) {
         TransferOrder order = getOrThrow(transferNo);
         fireEvent(order, TransferOrderEvent.CANCEL);
 
-        // Release stock if currently locked
-        if (TransferOrderStatus.STOCK_LOCKED.name().equals(order.getStatus())) {
+        TransferOrderStatus prevStatus = TransferOrderStatus.valueOf(order.getStatus());
+
+        // Release reserved stock if approved (stock was locked on approval)
+        if (TransferOrderStatus.APPROVED.equals(prevStatus)) {
             inventoryService.unlockStock(order.getSkuId(), order.getSourceWarehouseId(),
                     order.getTransferQuantity(), order.getTransferNo(), operator);
+            releaseReservation(order.getId());
         }
 
-        TransferOrderStatus prevStatus = TransferOrderStatus.valueOf(order.getStatus());
         order.setStatus(TransferOrderStatus.CANCELLED.name());
         orderMapper.updateById(order);
         recordLog(order, prevStatus, TransferOrderStatus.CANCELLED, "CANCEL", operator);
-    }
 
-    // ==================== FAIL ====================
+        log.info("Transfer cancelled: {}", transferNo);
+    }
 
     @Override
     @Transactional
@@ -284,6 +315,9 @@ public class TransferOrderServiceImpl implements TransferOrderService {
         order.setStatus(TransferOrderStatus.FAILED.name());
         orderMapper.updateById(order);
         recordLog(order, prevStatus, TransferOrderStatus.FAILED, "FAIL", operator);
+
+        // MQ event
+        transferEventProducer.sendOrderFailed(order, remark);
     }
 
     // ==================== QUERIES ====================
@@ -318,7 +352,7 @@ public class TransferOrderServiceImpl implements TransferOrderService {
         );
     }
 
-    // ==================== PRIVATE HELPERS ====================
+    // ==================== Private Helpers ====================
 
     private TransferOrder getOrThrow(String transferNo) {
         TransferOrder order = getByTransferNo(transferNo);
@@ -333,21 +367,23 @@ public class TransferOrderServiceImpl implements TransferOrderService {
      */
     private void fireEvent(TransferOrder order, TransferOrderEvent event) {
         StateMachine<TransferOrderStatus, TransferOrderEvent> sm = stateMachineFactory.getStateMachine();
-        sm.start();
+        sm.startReactively().block();
 
         // Restore current state
         TransferOrderStatus currentStatus = TransferOrderStatus.valueOf(order.getStatus());
         sm.getStateMachineAccessor()
-                .doWithAllRegions(access -> access.resetStateMachine(
+                .doWithAllRegions(access -> access.resetStateMachineReactively(
                         new org.springframework.statemachine.support.DefaultStateMachineContext<>(
-                                currentStatus, null, null, null)));
+                                currentStatus, null, null, null)).block());
 
         Message<TransferOrderEvent> msg = MessageBuilder
                 .withPayload(event)
                 .setHeader("transferNo", order.getTransferNo())
                 .build();
 
-        boolean accepted = sm.sendEvent(msg);
+        boolean accepted = Boolean.TRUE.equals(sm.sendEvent(reactor.core.publisher.Mono.just(msg))
+                .any(r -> r.getResultType() == StateMachineEventResult.ResultType.ACCEPTED)
+                .block());
         if (!accepted) {
             throw new StateTransitionException(order.getStatus(), event.name());
         }
@@ -371,5 +407,82 @@ public class TransferOrderServiceImpl implements TransferOrderService {
         } catch (NumberFormatException e) {
             return null;
         }
+    }
+
+    /**
+     * Validate stock availability for the transfer order.
+     * No lock — only checks if available_stock >= transfer_qty.
+     */
+    private void validateStockAvailability(TransferOrder order) {
+        WarehouseInventory inv = inventoryService.getBySkuAndWarehouse(
+                order.getSkuId(), order.getSourceWarehouseId());
+        if (inv == null || inv.getAvailableStock() == null || inv.getAvailableStock() < order.getTransferQuantity()) {
+            int available = inv != null && inv.getAvailableStock() != null ? inv.getAvailableStock() : 0;
+            throw new StockInsufficientException(order.getSkuId(), order.getSourceWarehouseId(),
+                    order.getTransferQuantity(), available);
+        }
+        log.info("Stock validation passed: skuId={}, warehouseId={}, available={}, need={}",
+                order.getSkuId(), order.getSourceWarehouseId(), inv.getAvailableStock(), order.getTransferQuantity());
+    }
+
+    /**
+     * Create reservation record (idempotent via unique key).
+     */
+    private void createReservation(TransferOrder order) {
+        InventoryReservation reservation = new InventoryReservation();
+        reservation.setReservationNo(NoGenerator.generateReservationNo());
+        reservation.setTransferOrderId(order.getId());
+        reservation.setSkuId(order.getSkuId());
+        reservation.setWarehouseId(order.getSourceWarehouseId());
+        reservation.setQuantity(order.getTransferQuantity());
+        reservation.setStatus(ReservationStatus.RESERVED.name());
+
+        try {
+            reservationMapper.insert(reservation);
+            log.info("Reservation created: reservationNo={}, transferOrderId={}",
+                    reservation.getReservationNo(), order.getId());
+        } catch (Exception e) {
+            log.warn("Reservation duplicate (idempotent): transferOrderId={}", order.getId());
+            throw new BusinessException("预占记录重复，操作幂等跳过: " + order.getTransferNo());
+        }
+    }
+
+    /**
+     * Write off reservation — called on outbound success.
+     */
+    private void writeOffReservation(Long transferOrderId) {
+        LambdaUpdateWrapper<InventoryReservation> wrapper = new LambdaUpdateWrapper<>();
+        wrapper.eq(InventoryReservation::getTransferOrderId, transferOrderId)
+                .eq(InventoryReservation::getStatus, ReservationStatus.RESERVED.name())
+                .set(InventoryReservation::getStatus, ReservationStatus.WRITTEN_OFF.name());
+
+        int rows = reservationMapper.update(null, wrapper);
+        log.info("Reservation written off: transferOrderId={}, rows={}", transferOrderId, rows);
+    }
+
+    /**
+     * Release reservation — called on cancel/reject/timeout.
+     */
+    private void releaseReservation(Long transferOrderId) {
+        LambdaUpdateWrapper<InventoryReservation> wrapper = new LambdaUpdateWrapper<>();
+        wrapper.eq(InventoryReservation::getTransferOrderId, transferOrderId)
+                .eq(InventoryReservation::getStatus, ReservationStatus.RESERVED.name())
+                .set(InventoryReservation::getStatus, ReservationStatus.RELEASED.name());
+
+        int rows = reservationMapper.update(null, wrapper);
+        log.info("Reservation released: transferOrderId={}, rows={}", transferOrderId, rows);
+    }
+
+    /**
+     * Create approval record — PENDING, no approver assigned yet.
+     * The actual approver will be filled in when approve/reject is called.
+     */
+    private void createApprovalRecord(TransferOrder order) {
+        ApprovalRecord record = new ApprovalRecord();
+        record.setBizType("TRANSFER");
+        record.setBizNo(order.getTransferNo());
+        record.setApproveResult("PENDING");
+        approvalRecordMapper.insert(record);
+        log.info("Approval record created: bizNo={}", order.getTransferNo());
     }
 }

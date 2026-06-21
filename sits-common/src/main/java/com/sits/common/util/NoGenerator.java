@@ -56,4 +56,11 @@ public final class NoGenerator {
     public static String generateEventId() {
         return "EVT" + IdUtil.fastSimpleUUID().toUpperCase();
     }
+
+    /**
+     * Generate a reservation number for inventory reservation.
+     */
+    public static String generateReservationNo() {
+        return "RSV" + LocalDateTime.now().format(DATE_FORMAT) + IdUtil.fastSimpleUUID().substring(0, 8).toUpperCase();
+    }
 }

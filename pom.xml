@@ -13,6 +13,8 @@
     <description>Smart Inventory Transfer System - Parent POM</description>
 
     <modules>
+        <module>sits-model</module>
+        <module>sits-mapper</module>
         <module>sits-common</module>
         <module>sits-admin</module>
         <module>sits-inventory</module>
@@ -31,7 +33,7 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
 
         <!-- Framework versions -->
-        <spring-boot.version>3.2.5</spring-boot.version>
+        <spring-boot.version>3.5.11</spring-boot.version>
         <spring-statemachine.version>4.0.0</spring-statemachine.version>
         <mybatis-plus.version>3.5.6</mybatis-plus.version>
         <mybatis-spring.version>3.0.3</mybatis-spring.version>
@@ -42,8 +44,7 @@
         <sa-token.version>1.38.0</sa-token.version>
 
         <!-- AI versions -->
-        <spring-ai.version>2.0.0-RC2</spring-ai.version>
-        <spring-ai-openai.version>1.0.0-M6</spring-ai-openai.version>
+        <spring-ai.version>1.1.8</spring-ai.version>
 
         <!-- Utility versions -->
         <hutool.version>5.8.28</hutool.version>
@@ -119,16 +120,13 @@
                 <version>${sa-token.version}</version>
             </dependency>
 
-            <!-- Spring AI -->
+            <!-- Spring AI BOM -->
             <dependency>
                 <groupId>org.springframework.ai</groupId>
-                <artifactId>spring-ai-client-chat</artifactId>
+                <artifactId>spring-ai-bom</artifactId>
                 <version>${spring-ai.version}</version>
-            </dependency>
-            <dependency>
-                <groupId>org.springframework.ai</groupId>
-                <artifactId>spring-ai-openai-spring-boot-starter</artifactId>
-                <version>${spring-ai-openai.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
             </dependency>
 
             <!-- Hutool -->
@@ -153,6 +151,16 @@
             </dependency>
 
             <!-- Internal modules -->
+            <dependency>
+                <groupId>com.sits</groupId>
+                <artifactId>sits-model</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.sits</groupId>
+                <artifactId>sits-mapper</artifactId>
+                <version>${project.version}</version>
+            </dependency>
             <dependency>
                 <groupId>com.sits</groupId>
                 <artifactId>sits-common</artifactId>

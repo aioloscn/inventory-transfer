@@ -5,7 +5,6 @@ package com.sits.common.enums;
  */
 public enum TransferOrderEvent {
 
-    LOCK_STOCK("锁定库存"),
     SUBMIT_APPROVAL("提交审批"),
     APPROVE("审批通过"),
     REJECT("审批拒绝"),

@@ -5,11 +5,11 @@ import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.sits.admin.entity.SysUser;
 import com.sits.admin.mapper.SysUserMapper;
 import com.sits.admin.service.SysUserService;
-import cn.hutool.crypto.digest.BCrypt;
 import com.sits.common.exception.BusinessException;
 import com.sits.common.service.UserAuthService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -28,9 +28,12 @@ public class SysUserServiceImpl implements SysUserService, UserAuthService {
     private static final Logger log = LoggerFactory.getLogger(SysUserServiceImpl.class);
 
     private final SysUserMapper sysUserMapper;
+    
+    private final PasswordEncoder passwordEncoder;
 
-    public SysUserServiceImpl(SysUserMapper sysUserMapper) {
+    public SysUserServiceImpl(SysUserMapper sysUserMapper, PasswordEncoder passwordEncoder) {
         this.sysUserMapper = sysUserMapper;
+        this.passwordEncoder = passwordEncoder;
     }
 
     // ==================== UserAuthService 实现 ====================
@@ -46,8 +49,8 @@ public class SysUserServiceImpl implements SysUserService, UserAuthService {
             log.warn("用户已禁用: {}", username);
             return null;
         }
-        // BCrypt 校验密码（使用 Hutool）
-        if (!BCrypt.checkpw(rawPassword, user.getPassword())) {
+        // BCrypt 校验密码
+        if (!passwordEncoder.matches(rawPassword, user.getPassword())) {
             log.warn("密码错误: {}", username);
             return null;
         }
@@ -113,7 +116,7 @@ public class SysUserServiceImpl implements SysUserService, UserAuthService {
             throw new BusinessException("用户名已存在: " + user.getUsername());
         }
         // BCrypt 加密密码
-        user.setPassword(BCrypt.hashpw(user.getPassword()));
+        user.setPassword(passwordEncoder.encode(user.getPassword()));
         sysUserMapper.insert(user);
         log.info("用户创建成功: {}", user.getUsername());
     }
@@ -135,7 +138,7 @@ public class SysUserServiceImpl implements SysUserService, UserAuthService {
     @Transactional
     public void changePassword(Long userId, String newPassword) {
         SysUser user = getById(userId);
-        user.setPassword(BCrypt.hashpw(newPassword));
+        user.setPassword(passwordEncoder.encode(newPassword));
         sysUserMapper.updateById(user);
         log.info("用户 {} 密码已修改", user.getUsername());
     }

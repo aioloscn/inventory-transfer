@@ -36,14 +36,7 @@ public class TransferEventProducer {
     }
 
     /**
-     * Send event: Stock locked.
-     */
-    public void sendStockLocked(TransferOrder order) {
-        send(order, MqEventType.TRANSFER_STOCK_LOCKED);
-    }
-
-    /**
-     * Send event: Approval passed.
+     * Send event: Approval passed (includes stock reservation).
      */
     public void sendApprovalPassed(TransferOrder order) {
         send(order, MqEventType.TRANSFER_APPROVAL_PASSED);
@@ -69,8 +62,6 @@ public class TransferEventProducer {
     public void sendOrderFailed(TransferOrder order, String reason) {
         send(order, MqEventType.TRANSFER_ORDER_FAILED);
     }
-
-    // -- private --
 
     private void send(TransferOrder order, MqEventType eventType) {
         String eventId = NoGenerator.generateEventId();

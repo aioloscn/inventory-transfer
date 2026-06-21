@@ -1,18 +1,23 @@
 package com.sits.ai.controller;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sits.ai.service.AiReportService;
+import com.sits.common.base.Result;
 import org.springframework.ai.chat.client.ChatClient;
-import org.springframework.ai.model.function.FunctionCallback;
+import org.springframework.ai.tool.ToolCallback;
+import org.springframework.http.MediaType;
+import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.web.bind.annotation.*;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
 
 import java.time.LocalDate;
 import java.util.*;
-import java.util.stream.Collectors;
 
 /**
  * AI Copilot API — 聊天、日报生成、异常诊断。
  *
- * <p>AI 可自动调用以下只读函数获取数据：
+ * <p>AI 可自动调用以下只读工具获取数据：
  * <ul>
  *   <li>queryInventory — 查询 SKU 库存</li>
  *   <li>listWarehouseInventory — 列出仓库库存</li>
@@ -26,52 +31,102 @@ import java.util.stream.Collectors;
 public class AiCopilotController {
 
     private final ChatClient chatClient;
-    private final List<FunctionCallback> functionCallbacks;
+    private final List<ToolCallback> toolCallbacks;
     private final AiReportService aiReportService;
+    private final ObjectMapper objectMapper;
 
     public AiCopilotController(ChatClient chatClient,
-                               List<FunctionCallback> functionCallbacks,
-                               AiReportService aiReportService) {
+                               List<ToolCallback> toolCallbacks,
+                               AiReportService aiReportService,
+                               ObjectMapper objectMapper) {
         this.chatClient = chatClient;
-        this.functionCallbacks = functionCallbacks;
+        this.toolCallbacks = toolCallbacks;
         this.aiReportService = aiReportService;
+        this.objectMapper = objectMapper;
     }
 
     /**
-     * 聊天接口 — 发送自然语言问题，AI 自动调用工具函数获取数据后回答。
+     * 流式聊天接口 — SSE 方式逐 token 推送，事件统一 JSON 格式：
+     * <pre>{@code
+     *   data: {"type":"delta","content":"xxx"}
+     *   data: {"type":"done"}
+     * }</pre>
+     * 注入系统提示词要求 AI 输出结构化 Markdown（表格/列表/标题）。
      */
-    @PostMapping("/chat")
-    public Map<String, Object> chat(@RequestBody Map<String, String> request) {
+    @PostMapping(value = "/chat/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public Flux<ServerSentEvent<String>> chatStream(@RequestBody Map<String, String> request) {
         String question = request.getOrDefault("question", "");
 
-        String answer = chatClient.prompt()
-                .tools(functionCallbacks.toArray(new FunctionCallback[0]))
+        return chatClient.prompt()
+                .system(buildMarkdownSystemPrompt())
+                .toolCallbacks(toolCallbacks.toArray(new ToolCallback[0]))
                 .user(question)
-                .call()
-                .content();
+                .stream()
+                .content()
+                .map(this::buildDeltaEvent)
+                .concatWith(Mono.just(
+                        ServerSentEvent.<String>builder()
+                                .data("{\"type\":\"done\"}")
+                                .build()));
+    }
 
-        Map<String, Object> result = new LinkedHashMap<>();
-        result.put("question", question);
-        result.put("answer", answer != null ? answer : "AI 未生成回答");
-        result.put("availableTools", functionCallbacks.stream()
-                .map(FunctionCallback::getName)
-                .collect(Collectors.toList()));
-        return result;
+    /** 将 token 封装为 {"type":"delta","content":"..."} 的 ServerSentEvent */
+    private ServerSentEvent<String> buildDeltaEvent(String token) {
+        try {
+            Map<String, String> event = new LinkedHashMap<>();
+            event.put("type", "delta");
+            event.put("content", token);
+            return ServerSentEvent.<String>builder()
+                    .data(objectMapper.writeValueAsString(event))
+                    .build();
+        } catch (Exception e) {
+            return ServerSentEvent.<String>builder()
+                    .data("{\"type\":\"delta\",\"content\":\"\"}")
+                    .build();
+        }
     }
 
     /**
-     * 生成运营日报 — 自动收集系统数据，交给 AI 生成日报。
-     *
-     * <p>日报内容包括：风险统计、调拨单状态分布、调拨建议统计、补偿任务等。
-     * <p>AI 会对数据进行解读，指出需要关注的问题，并给出行动建议。
+     * 系统提示词：要求 AI 使用结构化 Markdown 输出，
+     * 库存风险必须用表格，调拨建议用有序列表。
      */
-    @PostMapping("/daily-report")
-    public Map<String, Object> dailyReport() {
-        // 收集系统运行数据
+    private String buildMarkdownSystemPrompt() {
+        return """
+                你是智能库存调拨系统的 AI Copilot。
+                
+                回答要求：
+                1. 使用 Markdown 格式输出，不要输出 HTML。
+                2. 不要输出无结构的大段纯文本，必须分节、分点。
+                3. 库存风险分析必须优先使用 Markdown 表格。
+                4. 每个 SKU 单独一行。
+                5. 调拨建议使用有序列表，按优先级从高到低排列。
+                6. 风险等级使用：高风险 / 中风险 / 低风险。
+                7. 回答结构固定为：
+                
+                ## 库存风险概览
+                用 2~3 句话总结当前风险情况。
+                
+                ## 风险明细
+                使用 Markdown 表格，字段包括：
+                | SKU | 仓库 | 风险类型 | 风险等级 | 当前库存 | 安全库存 | 建议处理 |
+                |---|---|---|---|---|---|---|
+                
+                ## 调拨建议
+                使用有序列表说明建议优先级，每条建议注明涉及的 SKU、仓库、数量。
+                
+                ## 注意事项
+                说明是否需要人工确认、是否建议生成调拨单、是否存在数据不足。
+                """;
+    }
+
+    /**
+     * 生成运营日报 — 自动收集系统数据，交给 AI 生成日报（SSE 流式）。
+     */
+    @PostMapping(value = "/daily-report/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public Flux<ServerSentEvent<String>> dailyReportStream() {
         Map<String, Object> reportData = aiReportService.gatherReportData();
         String context = aiReportService.formatReportContext(reportData);
 
-        // 构造 AI 日报提示词
         String prompt = context + "\n\n"
                 + "请根据以上数据，生成一份专业的「库存运营日报」（日期：" + LocalDate.now() + "）。要求：\n"
                 + "1. 先概述今日整体运营概况（一句话总结）\n"
@@ -80,87 +135,72 @@ public class AiCopilotController {
                 + "4. 行动建议：给出 2-3 条具体的运营建议\n"
                 + "格式使用 Markdown，层次分明，数据准确。";
 
-        String answer = chatClient.prompt()
+        return chatClient.prompt()
                 .user(prompt)
-                .call()
-                .content();
-
-        Map<String, Object> result = new LinkedHashMap<>();
-        result.put("date", LocalDate.now().toString());
-        result.put("answer", answer != null ? answer : "AI 未生成回答");
-        result.put("reportData", reportData);
-        return result;
+                .stream()
+                .content()
+                .map(this::buildDeltaEvent)
+                .concatWith(Mono.just(
+                        ServerSentEvent.<String>builder()
+                                .data("{\"type\":\"done\"}")
+                                .build()));
     }
 
     /**
-     * 异常诊断 — 针对指定调拨单，查询其详情和操作日志，交给 AI 诊断问题。
-     *
-     * <p>请求体: {"transferNo": "TO202601010001"}
-     * <p>AI 会分析调拨单的完整生命周期日志，判断是否存在异常（如卡在某状态过久、
-     * 取消原因、失败原因等），并给出处理建议。
+     * 异常诊断 — 针对指定调拨单，查询其详情和操作日志，交给 AI 诊断问题（SSE 流式）。
      */
-    @PostMapping("/diagnose")
-    public Map<String, Object> diagnose(@RequestBody Map<String, String> request) {
+    @PostMapping(value = "/diagnose/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public Flux<ServerSentEvent<String>> diagnoseStream(@RequestBody Map<String, String> request) {
         String transferNo = request.getOrDefault("transferNo", "");
 
-        // 收集诊断数据：调拨单详情 + 操作日志 + 源/目标库存
         Map<String, Object> diagnoseData = aiReportService.gatherDiagnoseData(transferNo);
 
         if (diagnoseData.containsKey("error")) {
-            Map<String, Object> errorResult = new LinkedHashMap<>();
-            errorResult.put("transferNo", transferNo);
-            errorResult.put("answer", "诊断失败：" + diagnoseData.get("error"));
-            return errorResult;
+            return Flux.just(
+                    ServerSentEvent.<String>builder()
+                            .data("{\"type\":\"delta\",\"content\":\"诊断失败：" + diagnoseData.get("error") + "\"}")
+                            .build(),
+                    ServerSentEvent.<String>builder()
+                            .data("{\"type\":\"done\"}")
+                            .build());
         }
 
-        // 构造诊断提示词
-        StringBuilder prompt = new StringBuilder();
-        prompt.append("请对以下调拨单进行异常诊断分析：\n\n");
-        prompt.append("【调拨单信息】\n");
-        prompt.append(diagnoseData.get("transferOrder")).append("\n\n");
-        prompt.append("【操作日志】\n");
-        prompt.append(diagnoseData.get("logs")).append("\n\n");
-        prompt.append("【源仓库库存】").append(diagnoseData.get("sourceInventory")).append("\n");
-        prompt.append("【目标仓库库存】").append(diagnoseData.get("targetInventory")).append("\n\n");
-        prompt.append("请分析：\n");
-        prompt.append("1. 该调拨单当前处于什么状态，是否正常\n");
-        prompt.append("2. 流程是否有异常（如某步骤耗时异常、卡在某个状态过久）\n");
-        prompt.append("3. 如果已取消或失败，可能的原因是什么\n");
-        prompt.append("4. 给出处理建议\n");
-        prompt.append("格式使用 Markdown，简洁明了。");
+        String prompt = "请对以下调拨单进行异常诊断分析：\n\n" +
+                "【调拨单信息】\n" +
+                diagnoseData.get("transferOrder") + "\n\n" +
+                "【操作日志】\n" +
+                diagnoseData.get("logs") + "\n\n" +
+                "【源仓库库存】" + diagnoseData.get("sourceInventory") + "\n" +
+                "【目标仓库库存】" + diagnoseData.get("targetInventory") + "\n\n" +
+                "请分析：\n" +
+                "1. 该调拨单当前处于什么状态，是否正常\n" +
+                "2. 流程是否有异常（如某步骤耗时异常、卡在某个状态过久）\n" +
+                "3. 如果已取消或失败，可能的原因是什么\n" +
+                "4. 给出处理建议\n" +
+                "格式使用 Markdown，简洁明了。";
 
-        String answer = chatClient.prompt()
-                .user(prompt.toString())
-                .call()
-                .content();
-
-        Map<String, Object> result = new LinkedHashMap<>();
-        result.put("transferNo", transferNo);
-        result.put("answer", answer != null ? answer : "AI 未生成回答");
-        result.put("diagnoseData", diagnoseData);
-        return result;
+        return chatClient.prompt()
+                .user(prompt)
+                .stream()
+                .content()
+                .map(this::buildDeltaEvent)
+                .concatWith(Mono.just(
+                        ServerSentEvent.<String>builder()
+                                .data("{\"type\":\"done\"}")
+                                .build()));
     }
 
-    /**
-     * 仪表盘统计数据 — 返回前端仪表盘所需的全部统计数值。
-     *
-     * <p>包含：四大卡片（风险数/调拨单数/待审批数/建议数）、
-     * 风险按类型和等级分布、调拨单状态分布、最近风险动态。
-     */
     @GetMapping("/dashboard-stats")
-    public Map<String, Object> dashboardStats() {
-        return aiReportService.gatherDashboardStats();
+    public Result<Map<String, Object>> dashboardStats() {
+        return Result.success(aiReportService.gatherDashboardStats());
     }
 
-    /**
-     * AI 模块健康检查。
-     */
     @GetMapping("/health")
     public Map<String, String> health() {
         Map<String, String> status = new LinkedHashMap<>();
         status.put("status", "UP");
         status.put("module", "ai-copilot");
-        status.put("toolsCount", String.valueOf(functionCallbacks.size()));
+        status.put("toolsCount", String.valueOf(toolCallbacks.size()));
         return status;
     }
 }

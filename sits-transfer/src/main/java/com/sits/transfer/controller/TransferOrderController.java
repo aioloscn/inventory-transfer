@@ -33,7 +33,7 @@ public class TransferOrderController {
         return Result.success(transferOrderService.create(skuId, sourceWarehouseId, targetWarehouseId, quantity, applicantId));
     }
 
-    @GetMapping
+    @GetMapping("/page")
     public Result<PageResult<TransferOrder>> page(PageQuery query) {
         return Result.success(transferOrderService.page(query));
     }
@@ -50,19 +50,14 @@ public class TransferOrderController {
 
     // -- State transitions --
 
-    @PostMapping("/{transferNo}/lock-stock")
-    public Result<Void> lockStock(@PathVariable String transferNo, @RequestParam String operator) {
-        transferOrderService.lockStock(transferNo, operator);
-        return Result.success();
-    }
-
     @PostMapping("/{transferNo}/submit-approval")
-    public Result<Void> submitApproval(@PathVariable String transferNo, @RequestParam String operator) {
+    public Result<Void> submitApproval(@PathVariable String transferNo,
+                                         @RequestParam String operator) {
         transferOrderService.submitApproval(transferNo, operator);
         return Result.success();
     }
 
-    @PostMapping("/{transferNo}/approve")
+    @PutMapping("/{transferNo}/approve")
     public Result<Void> approve(@PathVariable String transferNo,
                                  @RequestParam String approver,
                                  @RequestParam(required = false) String comment) {
@@ -70,7 +65,7 @@ public class TransferOrderController {
         return Result.success();
     }
 
-    @PostMapping("/{transferNo}/reject")
+    @PutMapping("/{transferNo}/reject")
     public Result<Void> reject(@PathVariable String transferNo,
                                 @RequestParam String approver,
                                 @RequestParam(required = false) String comment) {
@@ -78,9 +73,14 @@ public class TransferOrderController {
         return Result.success();
     }
 
-    @PostMapping("/{transferNo}/outbound")
-    public Result<Void> outboundSuccess(@PathVariable String transferNo, @RequestParam String operator) {
+    @PutMapping("/{transferNo}/outbound")
+    public Result<Void> startOutbound(@PathVariable String transferNo, @RequestParam String operator) {
         transferOrderService.startOutbound(transferNo, operator);
+        return Result.success();
+    }
+
+    @PutMapping("/{transferNo}/outbound/confirm")
+    public Result<Void> confirmOutbound(@PathVariable String transferNo, @RequestParam String operator) {
         transferOrderService.outboundSuccess(transferNo, operator);
         return Result.success();
     }
@@ -91,14 +91,19 @@ public class TransferOrderController {
         return Result.success();
     }
 
-    @PostMapping("/{transferNo}/inbound")
-    public Result<Void> inboundSuccess(@PathVariable String transferNo, @RequestParam String operator) {
+    @PutMapping("/{transferNo}/inbound")
+    public Result<Void> startInbound(@PathVariable String transferNo, @RequestParam String operator) {
         transferOrderService.startInbound(transferNo, operator);
+        return Result.success();
+    }
+
+    @PutMapping("/{transferNo}/inbound/confirm")
+    public Result<Void> confirmInbound(@PathVariable String transferNo, @RequestParam String operator) {
         transferOrderService.inboundSuccess(transferNo, operator);
         return Result.success();
     }
 
-    @PostMapping("/{transferNo}/cancel")
+    @PutMapping("/{transferNo}/cancel")
     public Result<Void> cancel(@PathVariable String transferNo, @RequestParam String operator) {
         transferOrderService.cancel(transferNo, operator);
         return Result.success();

@@ -11,10 +11,10 @@ import org.springframework.stereotype.Component;
 import java.util.List;
 
 /**
- * XXL-Job handler: Compensation Task Processing.
+ * XXL-Job 处理器：补偿任务处理。
  *
- * <p>Picks up pending/retrying compensation tasks and attempts to re-execute them.
- * Uses exponential backoff: 1min, 2min, 4min, 8min, 16min, then marks as FAILED.
+ * <p>拉取待处理 / 重试中的补偿任务，尝试重新执行。
+ * 采用指数退避策略：1分钟、2分钟、4分钟、8分钟、16分钟，最后标记为 FAILED。
  */
 @Component
 public class CompensationJobHandler {
@@ -42,7 +42,7 @@ public class CompensationJobHandler {
 
         for (CompensationTask task : tasks) {
             try {
-                // Attempt retry — the actual retry logic depends on the bizType
+                // 尝试重试 — 实际重试逻辑取决于 bizType
                 boolean retryOk = executeRetry(task);
 
                 if (retryOk) {
@@ -64,12 +64,12 @@ public class CompensationJobHandler {
     }
 
     /**
-     * Execute the actual retry based on bizType.
-     * Currently a placeholder — real implementation would re-invoke the failed operation.
+     * 根据 bizType 执行实际重试。
+     * 当前为占位实现 — 真实实现会重新调用失败的操作。
      */
     private boolean executeRetry(CompensationTask task) {
-        // TODO: Implement per-bizType retry logic
-        // e.g., re-send MQ message, re-trigger inventory lock, etc.
+        // TODO: 实现各 bizType 的重试逻辑
+        // 如：重新发送 MQ 消息、重试库存锁定等。
         log.info("Retrying compensation task: {} (bizType={}, bizNo={})",
                 task.getTaskNo(), task.getBizType(), task.getBizNo());
         return true; // Placeholder: assume success
@@ -77,13 +77,13 @@ public class CompensationJobHandler {
 
     private void handleRetryFailure(CompensationTask task) {
         if (task.getRetryCount() >= task.getMaxRetryCount() - 1) {
-            // Exhausted retries — mark as MANUAL
+            // 重试次数已耗尽 — 标记为 MANUAL
             riskService.updateCompensationTask(task.getId(),
                     CompensationStatus.MANUAL.name(),
                     "Exceeded max retry count (" + task.getMaxRetryCount() + ")");
             log.warn("Compensation task {} exhausted retries, marked as MANUAL", task.getTaskNo());
         } else {
-            // Schedule next retry with exponential backoff
+            // 按指数退避安排下次重试
             riskService.updateCompensationTask(task.getId(),
                     CompensationStatus.RETRYING.name(),
                     task.getErrorMessage());

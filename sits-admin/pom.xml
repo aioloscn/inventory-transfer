@@ -18,7 +18,20 @@
     <dependencies>
         <dependency>
             <groupId>com.sits</groupId>
+            <artifactId>sits-mapper</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.sits</groupId>
             <artifactId>sits-common</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.security</groupId>
+            <artifactId>spring-security-crypto</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-aop</artifactId>
         </dependency>
     </dependencies>
 

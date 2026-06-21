@@ -1,11 +1,14 @@
 package com.sits.approval.controller;
 
-import com.sits.approval.entity.ApprovalRecord;
+import com.sits.common.entity.ApprovalRecord;
 import com.sits.approval.service.ApprovalService;
+import com.sits.common.base.PageQuery;
+import com.sits.common.base.PageResult;
 import com.sits.common.base.Result;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
+import java.util.Map;
 
 /**
  * Approval record API.
@@ -39,5 +42,32 @@ public class ApprovalController {
             @RequestParam String result,
             @RequestParam(required = false) String comment) {
         return Result.success(approvalService.record(bizType, bizNo, approverId, result, comment));
+    }
+
+    /**
+     * Paged query for approval records.
+     */
+    @GetMapping("/page")
+    public Result<PageResult<ApprovalRecord>> page(PageQuery query,
+                                                    @RequestParam(required = false) String status) {
+        return Result.success(approvalService.page(query, status));
+    }
+
+    /**
+     * Approve a pending approval.
+     */
+    @PutMapping("/{id}/approve")
+    public Result<Void> approve(@PathVariable Long id, @RequestBody Map<String, String> body) {
+        approvalService.approve(id, body.get("comment"));
+        return Result.success();
+    }
+
+    /**
+     * Reject a pending approval.
+     */
+    @PutMapping("/{id}/reject")
+    public Result<Void> reject(@PathVariable Long id, @RequestBody Map<String, String> body) {
+        approvalService.reject(id, body.get("comment"));
+        return Result.success();
     }
 }

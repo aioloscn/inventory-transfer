@@ -4,33 +4,31 @@ import com.sits.common.enums.TransferOrderEvent;
 import com.sits.common.enums.TransferOrderStatus;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.statemachine.config.EnableStateMachineFactory;
 import org.springframework.statemachine.config.StateMachineConfigurerAdapter;
 import org.springframework.statemachine.config.builders.StateMachineStateConfigurer;
 import org.springframework.statemachine.config.builders.StateMachineTransitionConfigurer;
-import org.springframework.statemachine.guard.Guard;
 
 import java.util.EnumSet;
 
 /**
  * Spring StateMachine configuration for TransferOrder lifecycle.
  *
- * <p>State transitions as defined in the product design document:
+ * <p>State transitions (v2 — lock stock on approval, not before):
  * <pre>
- * CREATED      + LOCK_STOCK       -> STOCK_LOCKED
- * STOCK_LOCKED + SUBMIT_APPROVAL  -> APPROVING
- * APPROVING    + APPROVE          -> APPROVED
- * APPROVING    + REJECT           -> REJECTED
- * APPROVED     + START_OUTBOUND   -> OUTBOUNDING
- * OUTBOUNDING  + OUTBOUND_SUCCESS -> OUTBOUNDED
- * OUTBOUNDED   + START_SHIP       -> IN_TRANSIT
- * IN_TRANSIT   + START_INBOUND    -> INBOUNDING
- * INBOUNDING   + INBOUND_SUCCESS  -> COMPLETED
- * CREATED      + CANCEL           -> CANCELLED
- * STOCK_LOCKED + CANCEL           -> CANCELLED
- * Any          + FAIL             -> FAILED
+ * CREATED    + SUBMIT_APPROVAL  -> APPROVING    (stock validation only, no lock)
+ * APPROVING  + APPROVE          -> APPROVED     (conditional lock stock + reservation record)
+ * APPROVING  + REJECT           -> REJECTED
+ * APPROVED   + START_OUTBOUND   -> OUTBOUNDING
+ * OUTBOUNDING + OUTBOUND_SUCCESS -> OUTBOUNDED   (deduct actual stock + write-off reservation)
+ * OUTBOUNDED + START_SHIP       -> IN_TRANSIT
+ * IN_TRANSIT + START_INBOUND    -> INBOUNDING
+ * INBOUNDING + INBOUND_SUCCESS  -> COMPLETED
+ * CREATED    + CANCEL           -> CANCELLED
+ * APPROVING  + CANCEL           -> CANCELLED
+ * APPROVED   + CANCEL           -> CANCELLED    (release reservation)
+ * Any        + FAIL             -> FAILED
  * </pre>
  */
 @Configuration
@@ -55,17 +53,13 @@ public class TransferStateMachineConfig
     public void configure(StateMachineTransitionConfigurer<TransferOrderStatus, TransferOrderEvent> transitions)
             throws Exception {
         transitions
-                // Normal flow
+                // Normal flow: CREATED -> APPROVING (submit for approval, validate stock only)
                 .withExternal()
                     .source(TransferOrderStatus.CREATED)
-                    .target(TransferOrderStatus.STOCK_LOCKED)
-                    .event(TransferOrderEvent.LOCK_STOCK)
-                    .and()
-                .withExternal()
-                    .source(TransferOrderStatus.STOCK_LOCKED)
                     .target(TransferOrderStatus.APPROVING)
                     .event(TransferOrderEvent.SUBMIT_APPROVAL)
                     .and()
+                // APPROVING -> APPROVED (lock stock within transaction)
                 .withExternal()
                     .source(TransferOrderStatus.APPROVING)
                     .target(TransferOrderStatus.APPROVED)
@@ -104,14 +98,19 @@ public class TransferStateMachineConfig
                     .event(TransferOrderEvent.REJECT)
                     .and()
 
-                // Cancellation (only from CREATED or STOCK_LOCKED)
+                // Cancellation
                 .withExternal()
                     .source(TransferOrderStatus.CREATED)
                     .target(TransferOrderStatus.CANCELLED)
                     .event(TransferOrderEvent.CANCEL)
                     .and()
                 .withExternal()
-                    .source(TransferOrderStatus.STOCK_LOCKED)
+                    .source(TransferOrderStatus.APPROVING)
+                    .target(TransferOrderStatus.CANCELLED)
+                    .event(TransferOrderEvent.CANCEL)
+                    .and()
+                .withExternal()
+                    .source(TransferOrderStatus.APPROVED)
                     .target(TransferOrderStatus.CANCELLED)
                     .event(TransferOrderEvent.CANCEL)
                     .and()

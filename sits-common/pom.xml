@@ -16,6 +16,10 @@
     <description>Shared enums, DTOs, exceptions, utility classes</description>
 
     <dependencies>
+        <dependency>
+            <groupId>com.sits</groupId>
+            <artifactId>sits-model</artifactId>
+        </dependency>
         <!-- Spring Web -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
@@ -38,6 +42,12 @@
         <dependency>
             <groupId>cn.dev33</groupId>
             <artifactId>sa-token-spring-boot3-starter</artifactId>
+        </dependency>
+
+        <!-- Sa-Token Redis 持久化 -->
+        <dependency>
+            <groupId>cn.dev33</groupId>
+            <artifactId>sa-token-redis-jackson</artifactId>
         </dependency>
 
         <!-- Jackson -->

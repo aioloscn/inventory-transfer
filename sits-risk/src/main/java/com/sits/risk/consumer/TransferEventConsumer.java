@@ -10,16 +10,16 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 /**
- * Consumer: Transfer order events.
+ * 消费者：调拨单事件。
  *
- * <p>Handles transfer lifecycle events for:
+ * <p>处理调拨生命周期事件：
  * <ul>
- *   <li>Logging / monitoring</li>
- *   <li>Triggering risk re-scan (after inventory changes)</li>
- *   <li>Creating compensation tasks on failure</li>
+ *   <li>日志记录 / 监控</li>
+ *   <li>触发风险重扫（库存变更后）</li>
+ *   <li>处理失败时抛出异常，由 RocketMQ 自动重试，最终进入 DLQ</li>
  * </ul>
  *
- * <p>Idempotency: guarded by mq_consume_record (event_id + consumer_group).
+ * <p>幂等：由 mq_consume_record 表 (event_id + consumer_group) 保障。
  */
 @Component
 @RocketMQMessageListener(
@@ -44,37 +44,52 @@ public class TransferEventConsumer implements RocketMQListener<TransferOrderEven
         log.info("MQ received: eventType={}, transferNo={}, eventId={}",
                 msg.getEventType(), msg.getTransferNo(), msg.getEventId());
 
-        // Idempotency guard
+        // 幂等检查
         if (riskService.isEventConsumed(msg.getEventId(), CONSUMER_GROUP)) {
             log.info("MQ event already consumed (idempotent): eventId={}", msg.getEventId());
             return;
         }
 
-        try {
-            process(msg);
-            riskService.recordEventConsumed(msg.getEventId(), CONSUMER_GROUP,
-                    msg.getTransferNo(), msg.getEventType());
-        } catch (Exception e) {
-            log.error("Failed to process MQ event: eventId={}, transferNo={}",
-                    msg.getEventId(), msg.getTransferNo(), e);
-
-            // Create compensation task for failed events
-            if (MqEventType.TRANSFER_ORDER_FAILED.name().equals(msg.getEventType())) {
-                riskService.createCompensationTask("TRANSFER", msg.getTransferNo(),
-                        "MQ processing failed: " + e.getMessage());
-            }
-        }
+        process(msg);
+        riskService.recordEventConsumed(msg.getEventId(), CONSUMER_GROUP,
+                msg.getTransferNo(), msg.getEventType());
     }
 
     private void process(TransferOrderEventMessage msg) {
         String eventType = msg.getEventType();
-        log.info("Processing transfer event: type={}, transferNo={}", eventType, msg.getTransferNo());
+        String transferNo = msg.getTransferNo();
 
-        // Currently logging only — future: trigger risk re-scan, notify downstream, etc.
-        if (MqEventType.TRANSFER_ORDER_FAILED.name().equals(eventType)) {
-            log.warn("Transfer order {} failed, consider creating compensation task", msg.getTransferNo());
-            riskService.createCompensationTask("TRANSFER", msg.getTransferNo(),
-                    "Transfer order failed, event received via MQ");
+        if (MqEventType.TRANSFER_ORDER_CREATED.name().equals(eventType)) {
+            log.info("Transfer order created: transferNo={}, skuId={}, qty={}",
+                    transferNo, msg.getSkuId(), msg.getQuantity());
+            riskService.logEventNotification(eventType, msg.getSkuId(), msg.getSourceWarehouseId(), msg.getQuantity());
+
+        } else if (MqEventType.TRANSFER_APPROVAL_PASSED.name().equals(eventType)) {
+            log.info("Transfer approval passed (stock reserved): transferNo={}, srcWarehouse={}, skuId={}, qty={}",
+                    transferNo, msg.getSourceWarehouseId(), msg.getSkuId(), msg.getQuantity());
+            // Risk rescan on approval — stock is now locked
+            riskService.rescanRisk(msg.getSkuId(), msg.getSourceWarehouseId());
+            riskService.logEventNotification(eventType, msg.getSkuId(), msg.getSourceWarehouseId(), msg.getQuantity());
+
+        } else if (MqEventType.TRANSFER_OUTBOUND_SUCCESS.name().equals(eventType)) {
+            log.info("Transfer outbound success: transferNo={}, srcWarehouse={}, skuId={}, qty={}",
+                    transferNo, msg.getSourceWarehouseId(), msg.getSkuId(), msg.getQuantity());
+            riskService.rescanRisk(msg.getSkuId(), msg.getSourceWarehouseId());
+            riskService.logEventNotification(eventType, msg.getSkuId(), msg.getSourceWarehouseId(), msg.getQuantity());
+
+        } else if (MqEventType.TRANSFER_INBOUND_SUCCESS.name().equals(eventType)) {
+            log.info("Transfer inbound success: transferNo={}, targetWarehouse={}, skuId={}, qty={}",
+                    transferNo, msg.getTargetWarehouseId(), msg.getSkuId(), msg.getQuantity());
+            riskService.rescanRisk(msg.getSkuId(), msg.getTargetWarehouseId());
+            riskService.logEventNotification(eventType, msg.getSkuId(), msg.getTargetWarehouseId(), msg.getQuantity());
+
+        } else if (MqEventType.TRANSFER_ORDER_FAILED.name().equals(eventType)) {
+            log.warn("Transfer order failed, will retry then DLQ: transferNo={}", transferNo);
+            riskService.logEventNotification(eventType, msg.getSkuId(), msg.getSourceWarehouseId(), msg.getQuantity());
+            throw new RuntimeException("Transfer order failed: " + transferNo);
+
+        } else {
+            log.debug("Unhandled event type: type={}, transferNo={}", eventType, transferNo);
         }
     }
 }

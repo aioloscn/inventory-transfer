@@ -7,9 +7,9 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 /**
- * XXL-Job handler: Transfer Suggestion Generation.
+ * XXL-Job 处理器：调拨建议生成。
  *
- * <p>Scheduled after risk scan to generate transfer suggestions for unresolved risks.
+ * <p>在风险扫描之后执行，为未解决的风险生成调拨建议。
  */
 @Component
 public class SuggestionGenerateJobHandler {

@@ -18,6 +18,10 @@
     <dependencies>
         <dependency>
             <groupId>com.sits</groupId>
+            <artifactId>sits-mapper</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.sits</groupId>
             <artifactId>sits-common</artifactId>
         </dependency>
 

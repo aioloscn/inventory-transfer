@@ -29,16 +29,10 @@
             <artifactId>sits-transfer</artifactId>
         </dependency>
 
-        <!-- Spring AI -->
+        <!-- Spring AI - OpenAI (DeepSeek API 兼容 OpenAI) -->
         <dependency>
             <groupId>org.springframework.ai</groupId>
-            <artifactId>spring-ai-client-chat</artifactId>
-            <scope>compile</scope>
-        </dependency>
-        <dependency>
-            <groupId>org.springframework.ai</groupId>
-            <artifactId>spring-ai-openai-spring-boot-starter</artifactId>
-            <version>${spring-ai-openai.version}</version>
+            <artifactId>spring-ai-starter-model-openai</artifactId>
         </dependency>
     </dependencies>
 

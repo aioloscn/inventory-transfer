@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.sits.risk.mapper.InventoryRiskMapper">
+
+    <!-- 批量 upsert：ON DUPLICATE KEY UPDATE，保护 PROCESSING/IGNORED 状态 -->
+    <insert id="batchUpsert" parameterType="java.util.List">
+        INSERT INTO inventory_risk
+        (risk_no, sku_id, warehouse_id, risk_type, risk_level,
+         available_stock, avg_daily_sales, support_days, status,
+         scan_batch_no, latest_scan_time, risk_fingerprint, create_time, update_time)
+        VALUES
+        <foreach collection="list" item="r" separator=",">
+        (#{r.riskNo}, #{r.skuId}, #{r.warehouseId}, #{r.riskType}, #{r.riskLevel},
+         #{r.availableStock}, #{r.avgDailySales}, #{r.supportDays}, 'NEW',
+         #{r.scanBatchNo}, NOW(), #{r.riskFingerprint}, NOW(), NOW())
+        </foreach>
+        ON DUPLICATE KEY UPDATE
+            risk_level = VALUES(risk_level),
+            available_stock = VALUES(available_stock),
+            avg_daily_sales = VALUES(avg_daily_sales),
+            support_days = VALUES(support_days),
+            scan_batch_no = VALUES(scan_batch_no),
+            latest_scan_time = NOW(),
+            status = CASE
+                WHEN status = 'RESOLVED' THEN 'NEW'
+                WHEN status = 'NEW' THEN 'NEW'
+                ELSE status
+            END
+    </insert>
+
+    <!-- 关闭本轮未命中的 NEW 风险 -->
+    <update id="closeResolvedRisks">
+        UPDATE inventory_risk
+        SET status = 'RESOLVED',
+            update_time = NOW()
+        WHERE status = 'NEW'
+          AND scan_batch_no IS NOT NULL
+          AND scan_batch_no &lt;&gt; #{currentScanBatchNo}
+    </update>
+
+</mapper>

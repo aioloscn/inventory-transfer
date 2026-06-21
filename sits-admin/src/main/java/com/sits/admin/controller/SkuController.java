@@ -44,7 +44,7 @@ public class SkuController {
         return Result.success(skuService.getById(id));
     }
 
-    @GetMapping
+    @GetMapping("/page")
     public Result<PageResult<Sku>> page(PageQuery query) {
         return Result.success(skuService.page(query));
     }

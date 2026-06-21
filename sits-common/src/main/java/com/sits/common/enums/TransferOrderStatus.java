@@ -6,7 +6,6 @@ package com.sits.common.enums;
 public enum TransferOrderStatus {
 
     CREATED("已创建"),
-    STOCK_LOCKED("库存已锁定"),
     APPROVING("审批中"),
     APPROVED("审批通过"),
     REJECTED("审批拒绝"),

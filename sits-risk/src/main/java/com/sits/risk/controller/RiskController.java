@@ -3,6 +3,7 @@ package com.sits.risk.controller;
 import com.sits.common.base.PageQuery;
 import com.sits.common.base.PageResult;
 import com.sits.common.base.Result;
+import com.sits.risk.dto.RiskScanResult;
 import com.sits.risk.entity.CompensationTask;
 import com.sits.risk.entity.InventoryRisk;
 import com.sits.risk.service.RiskService;
@@ -27,7 +28,7 @@ public class RiskController {
     // -- Risk scan --
 
     @PostMapping("/scan")
-    public Result<List<InventoryRisk>> scanRisks() {
+    public Result<RiskScanResult> scanRisks() {
         return Result.success(riskService.scanRisks());
     }
 

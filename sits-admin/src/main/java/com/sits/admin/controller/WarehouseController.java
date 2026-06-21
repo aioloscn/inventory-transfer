@@ -44,7 +44,7 @@ public class WarehouseController {
         return Result.success(warehouseService.getById(id));
     }
 
-    @GetMapping
+    @GetMapping("/page")
     public Result<PageResult<Warehouse>> page(PageQuery query) {
         return Result.success(warehouseService.page(query));
     }

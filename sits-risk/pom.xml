@@ -18,6 +18,10 @@
     <dependencies>
         <dependency>
             <groupId>com.sits</groupId>
+            <artifactId>sits-mapper</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.sits</groupId>
             <artifactId>sits-admin</artifactId>
         </dependency>
         <dependency>
@@ -33,6 +37,12 @@
         <dependency>
             <groupId>org.apache.rocketmq</groupId>
             <artifactId>rocketmq-spring-boot-starter</artifactId>
+        </dependency>
+
+        <!-- Redisson 分布式锁 -->
+        <dependency>
+            <groupId>org.redisson</groupId>
+            <artifactId>redisson-spring-boot-starter</artifactId>
         </dependency>
     </dependencies>
 
