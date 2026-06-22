@@ -39,14 +39,26 @@ spring:
     time-zone: Asia/Shanghai
     default-property-inclusion: non_null
 
-  # Spring AI - 使用 OpenAI 兼容协议对接 DeepSeek
+  # Spring AI - 使用 OpenAI 兼容协议对接 DeepSeek（API Key 已迁移至数据库）
   ai:
     openai:
-      api-key: sk-53b7f3a4ce2a4e5dbaa758074b2d5cf6
+      api-key: placeholder
       base-url: https://api.deepseek.com
       chat:
         options:
           model: deepseek-chat
+
+# AI 模块配置
+ai:
+  crypto:
+    secret: ${AI_CRYPTO_SECRET:sits-ai-default-secret-change-me}
+
+# SITS AI业务配置
+sits:
+  ai:
+    suggestion:
+      explanation:
+        enabled: true
 
 rocketmq:
   name-server: 81.71.45.30:9876

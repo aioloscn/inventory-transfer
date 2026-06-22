@@ -12,6 +12,10 @@ import com.sits.risk.dto.SuggestionExplainContext;
  */
 public interface TransferSuggestionExplanationEnhancer {
 
+    String DEFAULT_BEAN = "defaultTransferSuggestionExplanationEnhancer";
+
+    String AI_BEAN = "aiTransferSuggestionExplanationEnhancer";
+
     /**
      * 增强调拨建议的说明文本。
      *

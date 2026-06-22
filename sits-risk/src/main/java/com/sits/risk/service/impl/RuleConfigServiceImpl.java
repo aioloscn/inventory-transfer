@@ -72,6 +72,16 @@ public class RuleConfigServiceImpl implements RuleConfigService {
     }
 
     @Override
+    public double getDoubleValue(String key, double defaultValue) {
+        try {
+            return Double.parseDouble(getValue(key, String.valueOf(defaultValue)));
+        } catch (NumberFormatException e) {
+            log.warn("规则配置 {} 的值无法转为 double，使用默认值: {}", key, defaultValue);
+            return defaultValue;
+        }
+    }
+
+    @Override
     @Transactional
     public void saveOrUpdate(String key, String value, String description) {
         RuleConfig existing = ruleConfigMapper.selectOne(

@@ -28,6 +28,11 @@ public interface RuleConfigService {
     int getIntValue(String key, int defaultValue);
 
     /**
+     * 根据配置键获取 double 值。
+     */
+    double getDoubleValue(String key, double defaultValue);
+
+    /**
      * 更新或新增一条配置。
      *
      * @param key   配置键

@@ -31,6 +31,7 @@ import com.sits.risk.service.DistributedLockService;
 import com.sits.risk.service.RiskService;
 import com.sits.risk.service.RuleConfigService;
 import com.sits.risk.service.TransferSuggestionExplanationEnhancer;
+import com.sits.risk.service.TransferSuggestionExplanationEnhancerSelector;
 import com.sits.transfer.entity.TransferOrder;
 import com.sits.transfer.entity.TransferSuggestion;
 import com.sits.transfer.mapper.TransferSuggestionMapper;
@@ -85,6 +86,9 @@ public class RiskServiceImpl implements RiskService {
     private static final String KEY_SUGGESTION_EXPIRE = "suggestion_expire_days";
     private static final String KEY_SCAN_PAGE_SIZE = "risk_scan_page_size";
     private static final String KEY_LOCK_LEASE_MINUTES = "risk_scan_lock_lease_minutes";
+    private static final String KEY_COST_WEIGHT = "cost_weight";
+    private static final String KEY_TIME_WEIGHT = "time_weight";
+    private static final String KEY_STOCK_HEALTH_WEIGHT = "stock_health_weight";
 
     private final InventoryRiskMapper riskMapper;
     private final WarehouseInventoryMapper inventoryMapper;
@@ -97,7 +101,7 @@ public class RiskServiceImpl implements RiskService {
     private final RuleConfigService ruleConfigService;
     private final SkuMapper skuMapper;
     private final DistributedLockService lockService;
-    private final TransferSuggestionExplanationEnhancer enhancer;
+    private final TransferSuggestionExplanationEnhancerSelector enhancerSelector;
 
     @Autowired
     @Lazy
@@ -114,7 +118,7 @@ public class RiskServiceImpl implements RiskService {
                            RuleConfigService ruleConfigService,
                            SkuMapper skuMapper,
                            DistributedLockService lockService,
-                           @Lazy TransferSuggestionExplanationEnhancer enhancer) {
+                           @Lazy TransferSuggestionExplanationEnhancerSelector enhancerSelector) {
         this.riskMapper = riskMapper;
         this.inventoryMapper = inventoryMapper;
         this.salesStatMapper = salesStatMapper;
@@ -126,7 +130,7 @@ public class RiskServiceImpl implements RiskService {
         this.ruleConfigService = ruleConfigService;
         this.skuMapper = skuMapper;
         this.lockService = lockService;
-        this.enhancer = enhancer;
+        this.enhancerSelector = enhancerSelector;
     }
 
     // ==================== 风险扫描 ====================
@@ -515,6 +519,8 @@ public class RiskServiceImpl implements RiskService {
                 String finalReason = baseReason;
                 SuggestionExplainContext ctx = buildExplainContext(risk, targetWarehouse, targetInv,
                         c.warehouse(), c.inv(), c.transferableStock(), qty, c.score(), baseReason);
+
+                TransferSuggestionExplanationEnhancer enhancer = enhancerSelector.select(request);
                 finalReason = enhancer.enhance(ctx);
                 if (finalReason == null || finalReason.isBlank()) {
                     finalReason = baseReason;
@@ -660,55 +666,62 @@ public class RiskServiceImpl implements RiskService {
     }
 
     /**
-     * 计算候选源仓评分。
+     * 计算候选源仓评分，基于 rule_config 中的动态权重。
+     *
+     * <p>评分 = (时效维度 × time_weight + 成本维度 × cost_weight + 库存健康维度 × stock_health_weight) × 100
+     * 每个维度归一化到 [0,1]，最终分数在 0~100 之间。
      */
     private BigDecimal scoreCandidate(InventoryRisk risk, WarehouseInventory inv,
                                       Warehouse sourceWh, Warehouse targetWh, int transferableStock) {
-        BigDecimal score = BigDecimal.ZERO;
+        // 从配置中读取权重（带默认值兜底）
+        double timeWeight = ruleConfigService.getDoubleValue(KEY_TIME_WEIGHT, 0.3);
+        double costWeight = ruleConfigService.getDoubleValue(KEY_COST_WEIGHT, 0.4);
+        double stockHealthWeight = ruleConfigService.getDoubleValue(KEY_STOCK_HEALTH_WEIGHT, 0.3);
 
-        // 风险等级因子
+        // ---- 1. 时效维度：风险等级 + 支撑天数 → 归一化到 [0,1] ----
+        double riskLevelNorm;
         String level = risk.getRiskLevel();
         if (RiskLevel.HIGH.name().equals(level)) {
-            score = score.add(BigDecimal.valueOf(50));
+            riskLevelNorm = 1.0;
         } else if (RiskLevel.MEDIUM.name().equals(level)) {
-            score = score.add(BigDecimal.valueOf(30));
+            riskLevelNorm = 0.6;
         } else {
-            score = score.add(BigDecimal.valueOf(10));
+            riskLevelNorm = 0.2;
         }
 
-        // supportDays 越低，分越高
+        double supportDaysNorm = 0;
         BigDecimal sd = risk.getSupportDays();
         if (sd != null) {
             if (sd.compareTo(BigDecimal.valueOf(1)) <= 0) {
-                score = score.add(BigDecimal.valueOf(20));
+                supportDaysNorm = 1.0;
             } else if (sd.compareTo(BigDecimal.valueOf(3)) <= 0) {
-                score = score.add(BigDecimal.valueOf(12));
+                supportDaysNorm = 0.6;
             } else if (sd.compareTo(BigDecimal.valueOf(7)) <= 0) {
-                score = score.add(BigDecimal.valueOf(6));
+                supportDaysNorm = 0.3;
             }
         }
+        double timeScore = (riskLevelNorm + supportDaysNorm) / 2.0;
 
-        // 仓库优先级
-        score = score.add(BigDecimal.valueOf(sourceWh.getPriority() != null ? sourceWh.getPriority() : 0));
+        // ---- 2. 成本维度：仓库优先级 + 可调拨盈余比例 → 归一化到 [0,1] ----
+        double priorityNorm = Math.min((sourceWh.getPriority() != null ? sourceWh.getPriority() : 0) / 10.0, 1.0);
 
-        // 可调拨盈余比例
+        double surplusNorm = 0;
         int available = inv.getAvailableStock() != null ? inv.getAvailableStock() : 1;
         if (available > 0 && transferableStock > 0) {
-            BigDecimal ratio = BigDecimal.valueOf(transferableStock)
-                    .divide(BigDecimal.valueOf(available), 2, RoundingMode.HALF_UP);
-            score = score.add(ratio.multiply(BigDecimal.TEN));
+            surplusNorm = Math.min((double) transferableStock / available, 1.0);
         }
+        double costScore = (priorityNorm + surplusNorm) / 2.0;
 
-        // 同区域加分
-        if (sourceWh.getRegion() != null && sourceWh.getRegion().equals(targetWh.getRegion())) {
-            score = score.add(BigDecimal.valueOf(8));
-        }
-        // 同省加分
-        if (sourceWh.getProvince() != null && sourceWh.getProvince().equals(targetWh.getProvince())) {
-            score = score.add(BigDecimal.valueOf(5));
-        }
+        // ---- 3. 库存健康维度：地理位置亲和度 → 归一化到 [0,1] ----
+        boolean sameRegion = sourceWh.getRegion() != null
+                && sourceWh.getRegion().equals(targetWh.getRegion());
+        boolean sameProvince = sourceWh.getProvince() != null
+                && sourceWh.getProvince().equals(targetWh.getProvince());
+        double stockHealthScore = ((sameRegion ? 1.0 : 0) + (sameProvince ? 1.0 : 0)) / 2.0;
 
-        return score.setScale(2, RoundingMode.HALF_UP);
+        // ---- 加权求和，结果映射到 0~100 ----
+        double total = timeScore * timeWeight + costScore * costWeight + stockHealthScore * stockHealthWeight;
+        return BigDecimal.valueOf(total * 100).setScale(2, RoundingMode.HALF_UP);
     }
 
     /**

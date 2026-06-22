@@ -50,6 +50,16 @@ public class SaTokenConfig implements WebMvcConfigurer {
             SaRouter.match("/api/ai/**")
                     .check(r -> StpUtil.checkLogin());
 
+            // --- AI Model Management — ADMIN only ---
+            SaRouter.match("/api/ai/models/switch")
+                    .match("/api/ai/quota/**")
+                    .check(r -> StpUtil.checkRoleOr("ADMIN"));
+            // POST/PUT/DELETE on /api/ai/models — ADMIN only
+            SaRouter.matchMethod("POST", "PUT", "DELETE")
+                    .match("/api/ai/models")
+                    .match("/api/ai/models/**")
+                    .check(r -> StpUtil.checkRoleOr("ADMIN"));
+
             // --- ADMIN only: warehouse/SKU CRUD, risk management, user & role management ---
             SaRouter.match("/api/warehouses/**")
                     .match("/api/skus/**")

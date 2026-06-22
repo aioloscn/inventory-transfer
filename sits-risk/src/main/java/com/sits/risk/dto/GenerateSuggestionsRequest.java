@@ -18,7 +18,7 @@ public class GenerateSuggestionsRequest {
     /** 可选：本次最多生成多少条，默认100 */
     private Integer maxCount;
 
-    /** 可选：是否启用 AI 原因增强，默认false */
+    /** 可选：是否启用 AI 原因增强，默认true。仅在 YAML 总开关 enabled 时生效 */
     private Boolean enableAiExplanation;
 
     /** 可选：是否只预览不落库，默认false */
@@ -30,8 +30,9 @@ public class GenerateSuggestionsRequest {
         return maxCount != null && maxCount > 0 ? maxCount : 100;
     }
 
+    /** 未传值时默认启用 AI（用户需在页面主动关闭才不启用） */
     public boolean isAiEnabled() {
-        return enableAiExplanation != null && enableAiExplanation;
+        return enableAiExplanation == null || enableAiExplanation;
     }
 
     public boolean isDryRun() {
